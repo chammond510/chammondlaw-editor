@@ -1,0 +1,43 @@
+{% extends "editor/base.html" %}
+{% block title %}New Document{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto px-6 py-8">
+    <div class="mb-8">
+        <a href="{% url 'dashboard' %}" class="text-gray-400 hover:text-gray-600 text-sm mb-2 inline-flex items-center gap-1">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+            Back to Documents
+        </a>
+        <h1 class="text-2xl font-bold text-gray-900">New Document</h1>
+        <p class="text-gray-500 text-sm mt-1">Choose a template to get started</p>
+    </div>
+
+    {% for category_name, types in categories.items %}
+    <div class="mb-8">
+        <h2 class="text-lg font-semibold text-gray-700 mb-3">{{ category_name }}s</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {% for dt in types %}
+            <a href="{% url 'create_document' dt.slug %}"
+                class="bg-white rounded-lg border border-gray-200 px-5 py-4 hover:border-navy hover:shadow-md transition-all group">
+                <div class="flex items-start gap-3">
+                    <span class="text-2xl mt-0.5">{{ dt.icon }}</span>
+                    <div>
+                        <div class="font-medium text-gray-900 group-hover:text-navy transition-colors">{{ dt.name }}</div>
+                        <div class="text-sm text-gray-500 mt-1">{{ dt.description }}</div>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if not categories %}
+    <div class="text-center py-16 text-gray-500">
+        <p>No templates available. Run <code class="bg-gray-100 px-2 py-1 rounded">python manage.py seed_templates</code> to create them.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

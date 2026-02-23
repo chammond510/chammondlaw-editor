@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Legal Editor{% endblock %} — Hammond Law</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        navy: '#1B2A4A',
+                        gold: '#C5A55A',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="bg-gray-50 min-h-screen">
+    {% block body %}
+    <nav class="bg-navy text-white px-6 py-3 flex items-center justify-between">
+        <a href="/" class="flex items-center gap-2 text-lg font-semibold hover:text-gold transition-colors">
+            <span>⚖️</span>
+            <span>Legal Editor</span>
+        </a>
+        <div class="flex items-center gap-4">
+            {% if user.is_authenticated %}
+            <span class="text-sm text-gray-300">{{ user.username }}</span>
+            <a href="{% url 'logout' %}" class="text-sm text-gray-400 hover:text-white transition-colors">Logout</a>
+            {% endif %}
+        </div>
+    </nav>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    {% endblock %}
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

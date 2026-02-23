@@ -1,0 +1,26 @@
+databases:
+  - name: legal-editor-db
+    plan: free
+    databaseName: legal_editor
+    user: legal_editor
+
+services:
+  - type: web
+    name: legal-editor
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate && python manage.py seed_templates
+    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: legal-editor-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "editor.chammondlaw.com,.onrender.com"

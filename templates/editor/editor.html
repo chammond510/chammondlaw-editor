@@ -1,0 +1,396 @@
+{% extends "editor/base.html" %}
+{% block title %}{{ document.title }}{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* Editor content styling */
+    .tiptap-editor {
+        outline: none;
+        min-height: 60vh;
+        font-family: 'Georgia', 'Times New Roman', serif;
+        font-size: 16px;
+        line-height: 1.8;
+        color: #1a1a1a;
+    }
+    .tiptap-editor:focus { outline: none; }
+    .tiptap-editor h1 { font-size: 1.75em; font-weight: 700; margin: 1em 0 0.5em; color: #1B2A4A; }
+    .tiptap-editor h2 { font-size: 1.4em; font-weight: 700; margin: 1em 0 0.4em; color: #1B2A4A; }
+    .tiptap-editor h3 { font-size: 1.15em; font-weight: 700; margin: 0.8em 0 0.3em; color: #1B2A4A; }
+    .tiptap-editor p { margin: 0.4em 0; }
+    .tiptap-editor ul { list-style: disc; padding-left: 1.5em; margin: 0.5em 0; }
+    .tiptap-editor ol { list-style: decimal; padding-left: 1.5em; margin: 0.5em 0; }
+    .tiptap-editor li { margin: 0.2em 0; }
+    .tiptap-editor blockquote {
+        border-left: 3px solid #C5A55A;
+        padding-left: 1em;
+        margin: 0.8em 0;
+        color: #555;
+    }
+    .tiptap-editor hr {
+        border: none;
+        border-top: 1px solid #ddd;
+        margin: 1.5em 0;
+    }
+    .tiptap-editor a { color: #1B2A4A; text-decoration: underline; }
+    .tiptap-editor table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 1em 0;
+    }
+    .tiptap-editor th, .tiptap-editor td {
+        border: 1px solid #ddd;
+        padding: 0.5em 0.75em;
+        text-align: left;
+    }
+    .tiptap-editor th { background: #f5f5f5; font-weight: 600; }
+
+    /* Placeholder */
+    .tiptap-editor p.is-editor-empty:first-child::before {
+        content: attr(data-placeholder);
+        float: left;
+        color: #adb5bd;
+        pointer-events: none;
+        height: 0;
+    }
+
+    /* Toolbar button states */
+    .toolbar-btn {
+        transition: all 0.1s;
+    }
+    .toolbar-btn:hover {
+        background-color: #e5e7eb;
+    }
+    .toolbar-btn.is-active {
+        background-color: #1B2A4A;
+        color: white;
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<!-- Minimal nav for editor -->
+<div class="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+        <a href="{% url 'dashboard' %}" class="text-gray-400 hover:text-gray-600 transition-colors" title="Back to documents">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+        </a>
+        <input type="text" id="doc-title" value="{{ document.title }}"
+            class="text-lg font-semibold text-gray-900 border-none focus:outline-none focus:ring-0 bg-transparent w-96"
+            placeholder="Untitled Document">
+    </div>
+    <div class="flex items-center gap-3">
+        <span id="save-status" class="text-xs text-gray-400">Saved</span>
+        <a href="{% url 'export_docx' document.id %}"
+            class="bg-navy text-white px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors flex items-center gap-1.5"
+            title="Download as Word document">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Word
+        </a>
+    </div>
+</div>
+
+<!-- Toolbar -->
+<div id="toolbar" class="bg-white border-b border-gray-100 px-4 py-1.5 flex items-center gap-1 flex-wrap sticky top-0 z-10">
+    <!-- Text formatting -->
+    <button class="toolbar-btn p-1.5 rounded" data-action="bold" title="Bold (Ctrl+B)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3">
+            <path d="M6 4h8a4 4 0 014 4 4 4 0 01-4 4H6z"/>
+            <path d="M6 12h9a4 4 0 014 4 4 4 0 01-4 4H6z"/>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="italic" title="Italic (Ctrl+I)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="underline" title="Underline (Ctrl+U)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path d="M6 3v7a6 6 0 006 6 6 6 0 006-6V3"/><line x1="4" y1="21" x2="20" y2="21"/>
+        </svg>
+    </button>
+
+    <div class="w-px h-5 bg-gray-200 mx-1"></div>
+
+    <!-- Headings -->
+    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="1" title="Heading 1">H1</button>
+    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="2" title="Heading 2">H2</button>
+    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="3" title="Heading 3">H3</button>
+
+    <div class="w-px h-5 bg-gray-200 mx-1"></div>
+
+    <!-- Lists -->
+    <button class="toolbar-btn p-1.5 rounded" data-action="bulletList" title="Bullet List">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+            <circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="orderedList" title="Numbered List">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/>
+            <text x="2" y="8" font-size="8" fill="currentColor" stroke="none">1</text>
+            <text x="2" y="14" font-size="8" fill="currentColor" stroke="none">2</text>
+            <text x="2" y="20" font-size="8" fill="currentColor" stroke="none">3</text>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="blockquote" title="Block Quote">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M6 17h3l2-4V7H5v6h3zm8 0h3l2-4V7h-6v6h3z"/>
+        </svg>
+    </button>
+
+    <div class="w-px h-5 bg-gray-200 mx-1"></div>
+
+    <!-- Utilities -->
+    <button class="toolbar-btn p-1.5 rounded" data-action="horizontalRule" title="Horizontal Rule">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <line x1="2" y1="12" x2="22" y2="12"/>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="undo" title="Undo (Ctrl+Z)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path d="M3 10h10a5 5 0 015 5v0a5 5 0 01-5 5H9"/><polyline points="7 6 3 10 7 14"/>
+        </svg>
+    </button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="redo" title="Redo (Ctrl+Shift+Z)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path d="M21 10H11a5 5 0 00-5 5v0a5 5 0 005 5h4"/><polyline points="17 6 21 10 17 14"/>
+        </svg>
+    </button>
+
+    <!-- Right side: research placeholder -->
+    <div class="flex-grow"></div>
+    <div class="text-xs text-gray-300 italic" title="Coming in Phase 2">
+        🔍 Research sidebar coming soon
+    </div>
+</div>
+
+<!-- Editor area -->
+<div class="max-w-4xl mx-auto px-6 py-8">
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 px-12 py-10 min-h-[70vh]">
+        <div id="editor" class="tiptap-editor"></div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<!-- Tiptap via CDN (ESM) -->
+<script type="importmap">
+{
+    "imports": {
+        "@tiptap/core": "https://esm.sh/@tiptap/core@2.11.5",
+        "@tiptap/starter-kit": "https://esm.sh/@tiptap/starter-kit@2.11.5",
+        "@tiptap/extension-underline": "https://esm.sh/@tiptap/extension-underline@2.11.5",
+        "@tiptap/extension-placeholder": "https://esm.sh/@tiptap/extension-placeholder@2.11.5",
+        "@tiptap/extension-character-count": "https://esm.sh/@tiptap/extension-character-count@2.11.5",
+        "@tiptap/extension-text-align": "https://esm.sh/@tiptap/extension-text-align@2.11.5",
+        "@tiptap/extension-link": "https://esm.sh/@tiptap/extension-link@2.11.5",
+        "@tiptap/extension-table": "https://esm.sh/@tiptap/extension-table@2.11.5",
+        "@tiptap/extension-table-row": "https://esm.sh/@tiptap/extension-table-row@2.11.5",
+        "@tiptap/extension-table-cell": "https://esm.sh/@tiptap/extension-table-cell@2.11.5",
+        "@tiptap/extension-table-header": "https://esm.sh/@tiptap/extension-table-header@2.11.5"
+    }
+}
+</script>
+<script type="module">
+    import { Editor } from '@tiptap/core';
+    import StarterKit from '@tiptap/starter-kit';
+    import Underline from '@tiptap/extension-underline';
+    import Placeholder from '@tiptap/extension-placeholder';
+    import CharacterCount from '@tiptap/extension-character-count';
+    import TextAlign from '@tiptap/extension-text-align';
+    import Link from '@tiptap/extension-link';
+    import Table from '@tiptap/extension-table';
+    import TableRow from '@tiptap/extension-table-row';
+    import TableCell from '@tiptap/extension-table-cell';
+    import TableHeader from '@tiptap/extension-table-header';
+
+    const docId = '{{ document.id }}';
+    const csrfToken = '{{ csrf_token }}';
+
+    // Parse initial content
+    let initialContent;
+    try {
+        initialContent = JSON.parse('{{ document.content|escapejs }}');
+    } catch (e) {
+        initialContent = { type: 'doc', content: [{ type: 'paragraph' }] };
+    }
+
+    // Initialize editor
+    const editor = new Editor({
+        element: document.getElementById('editor'),
+        extensions: [
+            StarterKit,
+            Underline,
+            Placeholder.configure({
+                placeholder: 'Start writing...',
+            }),
+            CharacterCount,
+            TextAlign.configure({
+                types: ['heading', 'paragraph'],
+            }),
+            Link.configure({
+                openOnClick: false,
+            }),
+            Table.configure({ resizable: true }),
+            TableRow,
+            TableCell,
+            TableHeader,
+        ],
+        content: initialContent,
+        editorProps: {
+            attributes: {
+                class: 'tiptap-editor',
+            },
+        },
+    });
+
+    // Autosave
+    const saveStatus = document.getElementById('save-status');
+    let saveTimeout = null;
+    let isSaving = false;
+
+    async function saveContent() {
+        if (isSaving) return;
+        isSaving = true;
+        saveStatus.textContent = 'Saving...';
+        saveStatus.className = 'text-xs text-yellow-500';
+
+        try {
+            const response = await fetch(`/api/save/${docId}/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken,
+                },
+                body: JSON.stringify({
+                    content: editor.getJSON(),
+                }),
+            });
+
+            if (response.ok) {
+                saveStatus.textContent = 'Saved';
+                saveStatus.className = 'text-xs text-green-500';
+                setTimeout(() => {
+                    saveStatus.className = 'text-xs text-gray-400';
+                }, 2000);
+            } else {
+                saveStatus.textContent = 'Error saving';
+                saveStatus.className = 'text-xs text-red-500';
+            }
+        } catch (e) {
+            saveStatus.textContent = 'Error saving';
+            saveStatus.className = 'text-xs text-red-500';
+        }
+        isSaving = false;
+    }
+
+    editor.on('update', () => {
+        clearTimeout(saveTimeout);
+        saveStatus.textContent = 'Unsaved changes';
+        saveStatus.className = 'text-xs text-gray-400';
+        saveTimeout = setTimeout(saveContent, 3000);
+    });
+
+    // Title save
+    const titleInput = document.getElementById('doc-title');
+    let titleTimeout = null;
+    titleInput.addEventListener('input', () => {
+        clearTimeout(titleTimeout);
+        titleTimeout = setTimeout(async () => {
+            await fetch(`/api/title/${docId}/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken,
+                },
+                body: JSON.stringify({ title: titleInput.value }),
+            });
+        }, 1000);
+    });
+
+    // Toolbar actions
+    document.querySelectorAll('.toolbar-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.action;
+            switch (action) {
+                case 'bold':
+                    editor.chain().focus().toggleBold().run();
+                    break;
+                case 'italic':
+                    editor.chain().focus().toggleItalic().run();
+                    break;
+                case 'underline':
+                    editor.chain().focus().toggleUnderline().run();
+                    break;
+                case 'heading':
+                    const level = parseInt(btn.dataset.level);
+                    editor.chain().focus().toggleHeading({ level }).run();
+                    break;
+                case 'bulletList':
+                    editor.chain().focus().toggleBulletList().run();
+                    break;
+                case 'orderedList':
+                    editor.chain().focus().toggleOrderedList().run();
+                    break;
+                case 'blockquote':
+                    editor.chain().focus().toggleBlockquote().run();
+                    break;
+                case 'horizontalRule':
+                    editor.chain().focus().setHorizontalRule().run();
+                    break;
+                case 'undo':
+                    editor.chain().focus().undo().run();
+                    break;
+                case 'redo':
+                    editor.chain().focus().redo().run();
+                    break;
+            }
+        });
+    });
+
+    // Update toolbar active states
+    editor.on('selectionUpdate', updateToolbar);
+    editor.on('update', updateToolbar);
+
+    function updateToolbar() {
+        document.querySelectorAll('.toolbar-btn').forEach(btn => {
+            const action = btn.dataset.action;
+            let isActive = false;
+            switch (action) {
+                case 'bold': isActive = editor.isActive('bold'); break;
+                case 'italic': isActive = editor.isActive('italic'); break;
+                case 'underline': isActive = editor.isActive('underline'); break;
+                case 'heading':
+                    isActive = editor.isActive('heading', { level: parseInt(btn.dataset.level) });
+                    break;
+                case 'bulletList': isActive = editor.isActive('bulletList'); break;
+                case 'orderedList': isActive = editor.isActive('orderedList'); break;
+                case 'blockquote': isActive = editor.isActive('blockquote'); break;
+            }
+            btn.classList.toggle('is-active', isActive);
+        });
+    }
+
+    // Save before leaving
+    window.addEventListener('beforeunload', (e) => {
+        if (saveTimeout) {
+            saveContent();
+        }
+    });
+
+    // Keyboard shortcut: Ctrl+S to save
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            clearTimeout(saveTimeout);
+            saveContent();
+        }
+    });
+</script>
+{% endblock %}

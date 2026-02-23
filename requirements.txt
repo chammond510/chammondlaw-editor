@@ -1,0 +1,7 @@
+django==4.2.21
+gunicorn==23.0.0
+dj-database-url==2.3.0
+whitenoise==6.9.0
+python-docx==1.1.2
+psycopg2-binary==2.9.10
+weasyprint==63.1
