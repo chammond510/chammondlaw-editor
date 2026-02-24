@@ -58,8 +58,17 @@ DATABASES = {
     "default": dj_database_url.config(
         default="sqlite:///db.sqlite3",
         conn_max_age=600,
-    )
+    ),
+    "biaedge": dj_database_url.config(
+        default="",
+        env="BIAEDGE_DATABASE_URL",
+        conn_max_age=600,
+    ),
 }
+
+DATABASE_ROUTERS = ["editor.db_router.BiaEdgeRouter"]
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 AUTH_PASSWORD_VALIDATORS = []
 

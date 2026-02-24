@@ -24,3 +24,7 @@ services:
         value: "False"
       - key: ALLOWED_HOSTS
         value: "editor.chammondlaw.com,.onrender.com"
+      - key: BIAEDGE_DATABASE_URL
+        value: "postgresql://immigration:jwPaFDSbJn2lPH2PD7UYKch4Zbi1lksY@dpg-d62fmv4oud1c73dlrii0-a.oregon-postgres.render.com/immigration_decisions?sslmode=require"
+      - key: OPENAI_API_KEY
+        sync: false
