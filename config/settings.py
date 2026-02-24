@@ -58,8 +58,23 @@ DATABASES = {
     "default": dj_database_url.config(
         default="sqlite:///db.sqlite3",
         conn_max_age=600,
-    )
+    ),
 }
+
+if os.environ.get("BIAEDGE_DATABASE_URL"):
+    DATABASES["biaedge"] = dj_database_url.config(
+        env="BIAEDGE_DATABASE_URL",
+        conn_max_age=600,
+    )
+else:
+    DATABASES["biaedge"] = {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+
+DATABASE_ROUTERS = ["editor.db_router.BiaEdgeRouter"]
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 AUTH_PASSWORD_VALIDATORS = []
 
