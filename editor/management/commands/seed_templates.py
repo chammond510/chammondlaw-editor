@@ -641,13 +641,22 @@ TEMPLATES = [
 ]
 
 
+PHASE1_SLUGS = {
+    "i-130-cover-letter",
+    "defensive-asylum-brief",
+    "bond-brief",
+    "rfe-response",
+}
+
+
 class Command(BaseCommand):
     help = "Seed document templates"
 
     def handle(self, *args, **options):
         created = 0
         updated = 0
-        for t in TEMPLATES:
+        DocumentType.objects.exclude(slug__in=PHASE1_SLUGS).delete()
+        for t in [t for t in TEMPLATES if t["slug"] in PHASE1_SLUGS]:
             obj, was_created = DocumentType.objects.update_or_create(
                 slug=t["slug"],
                 defaults={

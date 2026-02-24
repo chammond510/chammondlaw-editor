@@ -5,7 +5,7 @@ A web-based legal document editor for immigration law practice, built with Djang
 ## Features
 
 - **Rich text editor** powered by Tiptap (ProseMirror) with toolbar formatting
-- **8 document templates** for immigration practice (briefs, cover letters, motions, declarations)
+- **4 starter templates** for Phase 1 (I-130 Cover Letter, Defensive Asylum Brief, Bond Brief, RFE Response)
 - **Autosave** — content saves automatically every 3 seconds
 - **Word export** — download any document as a properly formatted .docx file
 - **Format presets** — court briefs (double-spaced, Times New Roman), cover letters (single-spaced), declarations (numbered paragraphs)
@@ -15,13 +15,9 @@ A web-based legal document editor for immigration law practice, built with Djang
 | Template | Type | Description |
 |----------|------|-------------|
 | I-130 Cover Letter | Cover Letter | Family-based petition |
-| I-751 Cover Letter | Cover Letter | Removal of conditions |
-| RFE Response | Cover Letter | Response to Request for Evidence |
 | Defensive Asylum Brief | Brief | Full merits brief for defensive asylum |
 | Bond Brief | Brief | Bond/custody redetermination |
-| Hardship Waiver Brief | Brief | I-601/I-601A extreme hardship |
-| Motion to Reopen | Motion | MTR for Immigration Court / BIA |
-| Client Declaration | Declaration | Sworn client statement |
+| RFE Response | Cover Letter | Response to Request for Evidence |
 
 ## Quick Start
 
@@ -56,7 +52,7 @@ Environment variables needed:
 
 ## Architecture
 
-- **Backend:** Django 4.2 LTS
+- **Backend:** Django 5.2
 - **Editor:** Tiptap v2 (loaded via CDN/ESM, no build step)
 - **Export:** python-docx for Word, WeasyPrint for PDF (future)
 - **Styling:** Tailwind CSS (CDN)
