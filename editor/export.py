@@ -6,10 +6,11 @@ Supports format presets for legal documents (court briefs, cover letters, declar
 """
 
 import io
+from html import escape
+
 from docx import Document as DocxDocument
-from docx.shared import Pt, Inches, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.enum.style import WD_STYLE_TYPE
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_BREAK
 
 
 FORMAT_PRESETS = {
@@ -151,6 +152,10 @@ def _process_node(doc, node, preset, para_counter):
         run.font.size = Pt(8)
         run.font.color.rgb = None
 
+    elif node_type == "pageBreak":
+        p = doc.add_paragraph()
+        p.add_run().add_break(WD_BREAK.PAGE)
+
     elif node_type == "table":
         _process_table(doc, node, preset)
 
@@ -231,3 +236,145 @@ def _apply_text_parts(paragraph, text_parts):
             run.underline = True
         if "strike" in marks:
             run.font.strike = True
+        if "superscript" in marks:
+            run.font.superscript = True
+        if "subscript" in marks:
+            run.font.subscript = True
+
+
+def tiptap_to_pdf(tiptap_json, title="Document", export_format="court_brief"):
+    """Convert Tiptap JSON content to PDF using WeasyPrint."""
+    try:
+        from weasyprint import HTML
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF export requires WeasyPrint. Install with: pip install weasyprint"
+        ) from exc
+
+    html = tiptap_to_html(tiptap_json, title=title, export_format=export_format)
+    buffer = io.BytesIO()
+    HTML(string=html).write_pdf(target=buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def tiptap_to_html(tiptap_json, title="Document", export_format="court_brief"):
+    preset = FORMAT_PRESETS.get(export_format, FORMAT_PRESETS["court_brief"])
+    line_height = 2.0 if preset["line_spacing"] == WD_LINE_SPACING.DOUBLE else 1.2
+    body_nodes = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
+    body_html = "".join(_render_node_html(node) for node in body_nodes)
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{escape(title)}</title>
+  <style>
+    @page {{
+      margin: {preset["margin_inches"]}in;
+      size: letter;
+    }}
+    body {{
+      font-family: "{preset["font_name"]}", serif;
+      font-size: {preset["font_size"]}pt;
+      line-height: {line_height};
+      color: #1f2937;
+    }}
+    h1 {{ font-size: 14pt; margin: 12pt 0 6pt; }}
+    h2 {{ font-size: 13pt; margin: 10pt 0 5pt; }}
+    h3 {{ font-size: 12pt; margin: 8pt 0 4pt; }}
+    p {{ margin: 4pt 0; }}
+    blockquote {{
+      border-left: 2px solid #9ca3af;
+      margin: 8pt 0;
+      padding-left: 10pt;
+      color: #4b5563;
+    }}
+    hr {{ border: none; border-top: 1px solid #d1d5db; margin: 10pt 0; }}
+    .page-break {{ break-after: page; page-break-after: always; border: 0; margin: 0; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 8pt 0; }}
+    td, th {{ border: 1px solid #9ca3af; padding: 4pt; vertical-align: top; }}
+    ol, ul {{ margin: 6pt 0 6pt 20pt; }}
+  </style>
+</head>
+<body>
+{body_html}
+</body>
+</html>"""
+
+
+def _render_node_html(node):
+    node_type = node.get("type")
+    if node_type == "paragraph":
+        attrs = node.get("attrs", {})
+        align = attrs.get("textAlign")
+        style = f' style="text-align:{align};"' if align else ""
+        return f"<p{style}>{_render_inline_html(node.get('content', []))}</p>"
+    if node_type == "heading":
+        level = node.get("attrs", {}).get("level", 1)
+        level = max(1, min(3, int(level)))
+        return f"<h{level}>{_render_inline_html(node.get('content', []))}</h{level}>"
+    if node_type == "bulletList":
+        items = "".join(_render_list_item_html(item) for item in node.get("content", []))
+        return f"<ul>{items}</ul>"
+    if node_type == "orderedList":
+        items = "".join(_render_list_item_html(item) for item in node.get("content", []))
+        return f"<ol>{items}</ol>"
+    if node_type == "blockquote":
+        inner = "".join(_render_node_html(child) for child in node.get("content", []))
+        return f"<blockquote>{inner}</blockquote>"
+    if node_type == "horizontalRule":
+        return "<hr>"
+    if node_type == "pageBreak":
+        return '<hr class="page-break">'
+    if node_type == "table":
+        rows = []
+        for row in node.get("content", []):
+            cols = []
+            for cell in row.get("content", []):
+                tag = "th" if cell.get("type") == "tableHeader" else "td"
+                children = "".join(_render_node_html(child) for child in cell.get("content", []))
+                cols.append(f"<{tag}>{children}</{tag}>")
+            rows.append(f"<tr>{''.join(cols)}</tr>")
+        return f"<table>{''.join(rows)}</table>"
+    return ""
+
+
+def _render_list_item_html(item):
+    children = item.get("content", [])
+    parts = []
+    for child in children:
+        if child.get("type") == "paragraph":
+            parts.append(_render_inline_html(child.get("content", [])))
+        else:
+            parts.append(_render_node_html(child))
+    return f"<li>{''.join(parts)}</li>"
+
+
+def _render_inline_html(content):
+    pieces = []
+    for node in content:
+        node_type = node.get("type")
+        if node_type == "text":
+            text = escape(node.get("text", ""))
+            for mark in node.get("marks", []):
+                mark_type = mark.get("type")
+                if mark_type == "bold":
+                    text = f"<strong>{text}</strong>"
+                elif mark_type == "italic":
+                    text = f"<em>{text}</em>"
+                elif mark_type == "underline":
+                    text = f"<u>{text}</u>"
+                elif mark_type == "strike":
+                    text = f"<s>{text}</s>"
+                elif mark_type == "superscript":
+                    text = f"<sup>{text}</sup>"
+                elif mark_type == "subscript":
+                    text = f"<sub>{text}</sub>"
+                elif mark_type == "link":
+                    href = escape((mark.get("attrs") or {}).get("href") or "#")
+                    text = f'<a href="{href}">{text}</a>'
+            pieces.append(text)
+        elif node_type == "hardBreak":
+            pieces.append("<br>")
+    return "".join(pieces)

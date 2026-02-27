@@ -1,12 +1,19 @@
 import json
+import os
+from datetime import timedelta
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.utils import timezone
+from django.views.decorators.http import require_GET, require_POST
 
-from .models import Document, DocumentType
-from .export import tiptap_to_docx
+from .models import Document, DocumentType, DocumentVersion
+from .export import tiptap_to_docx, tiptap_to_pdf
+
+
+AUTO_SNAPSHOT_MINUTES = int(os.environ.get("AUTO_SNAPSHOT_MINUTES", "10"))
+MAX_SNAPSHOTS_PER_DOC = int(os.environ.get("MAX_SNAPSHOTS_PER_DOC", "100"))
 
 
 @login_required
@@ -48,7 +55,13 @@ def create_document(request, type_slug):
 @login_required
 def editor(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
-    return render(request, "editor/editor.html", {"document": doc})
+    versions = doc.versions.order_by("-created_at")[:30]
+    document_types = DocumentType.objects.all()
+    return render(
+        request,
+        "editor/editor.html",
+        {"document": doc, "versions": versions, "document_types": document_types},
+    )
 
 
 @login_required
@@ -65,8 +78,13 @@ def api_save(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
     try:
         data = json.loads(request.body)
-        doc.content = data.get("content", doc.content)
+        new_content = data.get("content", doc.content)
+        force_snapshot = bool(data.get("force_snapshot", False))
+        snapshot_label = (data.get("snapshot_label") or "").strip()[:100]
+
+        doc.content = new_content
         doc.save()
+        _maybe_create_snapshot(doc, new_content, force=force_snapshot, label=snapshot_label)
         return JsonResponse({"status": "ok", "updated_at": doc.updated_at.isoformat()})
     except (json.JSONDecodeError, Exception) as e:
         return JsonResponse({"status": "error", "message": str(e)}, status=400)
@@ -101,3 +119,117 @@ def export_docx(request, doc_id):
     )
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+@login_required
+def export_pdf(request, doc_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    export_format = "court_brief"
+    if doc.document_type:
+        export_format = doc.document_type.export_format
+
+    pdf_buffer = tiptap_to_pdf(doc.content, doc.title, export_format)
+
+    filename = doc.title.replace(" ", "_")[:50] + ".pdf"
+    response = HttpResponse(pdf_buffer.getvalue(), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@login_required
+@require_GET
+def api_versions(request, doc_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    versions = doc.versions.order_by("-created_at")[:100]
+    return JsonResponse(
+        {
+            "versions": [
+                {
+                    "id": v.id,
+                    "label": v.label,
+                    "created_at": v.created_at.isoformat(),
+                }
+                for v in versions
+            ]
+        }
+    )
+
+
+@login_required
+@require_POST
+def api_create_snapshot(request, doc_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    try:
+        data = json.loads(request.body or "{}")
+        label = (data.get("label") or "Manual snapshot").strip()[:100]
+    except json.JSONDecodeError:
+        label = "Manual snapshot"
+
+    version = DocumentVersion.objects.create(document=doc, content=doc.content, label=label)
+    _prune_snapshots(doc)
+    return JsonResponse(
+        {
+            "status": "ok",
+            "version": {
+                "id": version.id,
+                "label": version.label,
+                "created_at": version.created_at.isoformat(),
+            },
+        }
+    )
+
+
+@login_required
+@require_POST
+def api_restore_version(request, doc_id, version_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+
+    DocumentVersion.objects.create(
+        document=doc,
+        content=doc.content,
+        label=f"Before restore {timezone.now().strftime('%Y-%m-%d %H:%M')}",
+    )
+    doc.content = version.content
+    doc.save(update_fields=["content", "updated_at"])
+    _prune_snapshots(doc)
+
+    return JsonResponse(
+        {
+            "status": "ok",
+            "content": version.content,
+            "restored_version_id": version.id,
+            "updated_at": doc.updated_at.isoformat(),
+        }
+    )
+
+
+def _maybe_create_snapshot(doc, content, force=False, label=""):
+    last = doc.versions.order_by("-created_at").first()
+    if last and last.content == content and not force:
+        return None
+
+    snapshot_due = False
+    if force or not last:
+        snapshot_due = True
+    elif timezone.now() - last.created_at >= timedelta(minutes=AUTO_SNAPSHOT_MINUTES):
+        snapshot_due = True
+
+    if not snapshot_due:
+        return None
+
+    version = DocumentVersion.objects.create(
+        document=doc,
+        content=content,
+        label=label or f"Autosave {timezone.now().strftime('%Y-%m-%d %H:%M')}",
+    )
+    _prune_snapshots(doc)
+    return version
+
+
+def _prune_snapshots(doc):
+    ids_to_keep = list(
+        doc.versions.order_by("-created_at").values_list("id", flat=True)[:MAX_SNAPSHOTS_PER_DOC]
+    )
+    if ids_to_keep:
+        doc.versions.exclude(id__in=ids_to_keep).delete()

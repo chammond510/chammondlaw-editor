@@ -19,7 +19,7 @@ class BiaEdgeRouter:
 
     def db_for_write(self, model, **hints):
         if model._meta.model_name in self.biaedge_models:
-            return "biaedge"
+            raise RuntimeError("BIA Edge models are read-only in this app")
         return None
 
     def allow_relation(self, obj1, obj2, **hints):

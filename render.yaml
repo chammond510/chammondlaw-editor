@@ -9,7 +9,7 @@ services:
     name: legal-editor
     runtime: python
     plan: starter
-    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate && python manage.py seed_templates && python create_admin.py
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate && python manage.py seed_templates
     startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
     envVars:
       - key: DATABASE_URL
@@ -25,6 +25,6 @@ services:
       - key: ALLOWED_HOSTS
         value: "editor.chammondlaw.com,.onrender.com"
       - key: BIAEDGE_DATABASE_URL
-        value: "postgresql://immigration:jwPaFDSbJn2lPH2PD7UYKch4Zbi1lksY@dpg-d62fmv4oud1c73dlrii0-a.oregon-postgres.render.com/immigration_decisions?sslmode=require"
+        sync: false
       - key: OPENAI_API_KEY
         sync: false

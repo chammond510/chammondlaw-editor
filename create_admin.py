@@ -1,9 +1,24 @@
-import os, django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+import os
+
+import django
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
+
 from django.contrib.auth.models import User
-if not User.objects.filter(username='chris').exists():
-    User.objects.create_superuser('chris', 'chris@chammondlaw.com', 'Hammond2026!')
-    print('Created superuser: chris')
+
+
+username = os.environ.get("DJANGO_SUPERUSER_USERNAME")
+password = os.environ.get("DJANGO_SUPERUSER_PASSWORD")
+email = os.environ.get("DJANGO_SUPERUSER_EMAIL", "")
+
+if not username or not password:
+    print(
+        "Skipping superuser creation. Set DJANGO_SUPERUSER_USERNAME and "
+        "DJANGO_SUPERUSER_PASSWORD to enable."
+    )
+elif not User.objects.filter(username=username).exists():
+    User.objects.create_superuser(username, email, password)
+    print(f"Created superuser: {username}")
 else:
-    print('User chris already exists')
+    print(f"User {username} already exists")

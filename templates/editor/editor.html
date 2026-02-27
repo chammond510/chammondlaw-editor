@@ -13,12 +13,15 @@
     .tiptap-editor ol { list-style: decimal; padding-left: 1.5em; margin: 0.5em 0; }
     .tiptap-editor blockquote { border-left: 3px solid #C5A55A; padding-left: 1em; margin: 0.8em 0; color: #555; }
     .tiptap-editor hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
+    .tiptap-editor hr.page-break-node { border-top: 2px dashed #9ca3af; position: relative; margin: 2em 0; }
+    .tiptap-editor hr.page-break-node::after { content: 'Page Break'; position: absolute; right: 0; top: -10px; font-size: 11px; color: #6b7280; background: white; padding: 0 4px; }
     .tiptap-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; color: #adb5bd; pointer-events: none; height: 0; }
     .toolbar-btn { transition: all 0.1s; }
     .toolbar-btn:hover { background-color: #e5e7eb; }
     .toolbar-btn.is-active { background-color: #1B2A4A; color: white; }
-    .research-open #research-sidebar { width: 400px; opacity: 1; }
-    #research-sidebar { width: 0; opacity: 0; transition: width 0.2s ease, opacity 0.2s ease; }
+    .research-open #research-sidebar { width: 420px; opacity: 1; }
+    #research-sidebar { width: 0; opacity: 0; transition: width 0.2s ease, opacity 0.2s ease; position: relative; }
+    .tab-btn-active { background-color: #1B2A4A; color: white; }
 </style>
 {% endblock %}
 
@@ -30,12 +33,11 @@
         </a>
         <input type="text" id="doc-title" value="{{ document.title }}" class="text-lg font-semibold text-gray-900 border-none focus:outline-none focus:ring-0 bg-transparent w-96" placeholder="Untitled Document">
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2">
         <span id="save-status" class="text-xs text-gray-400">Saved</span>
-        <a href="{% url 'export_docx' document.id %}" class="bg-navy text-white px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-            Word
-        </a>
+        <button id="open-versions" class="border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Versions</button>
+        <a href="{% url 'export_docx' document.id %}" class="bg-navy text-white px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">Word</a>
+        <a href="{% url 'export_pdf' document.id %}" class="bg-gold text-navy px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">PDF</a>
     </div>
 </div>
 
@@ -51,6 +53,14 @@
     <button class="toolbar-btn p-1.5 rounded" data-action="bulletList">• List</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="orderedList">1. List</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="blockquote">Quote</button>
+    <div class="w-px h-5 bg-gray-200 mx-1"></div>
+    <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
+    <div class="w-px h-5 bg-gray-200 mx-1"></div>
+    <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
     <div class="w-px h-5 bg-gray-200 mx-1"></div>
     <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
@@ -69,55 +79,163 @@
 
     <aside id="research-sidebar" class="bg-white border-l border-gray-200 h-full overflow-y-auto shrink-0">
         <div class="p-4 border-b border-gray-100 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-navy">Research</h3>
+            <h3 class="text-sm font-semibold text-navy">Research & Exemplars</h3>
             <button id="research-close" class="text-gray-400 hover:text-gray-700">✕</button>
         </div>
         <div class="p-3 border-b border-gray-100 flex gap-2">
-            <button id="tab-search" class="px-3 py-1 text-xs rounded bg-navy text-white">Search</button>
-            <button id="tab-categories" class="px-3 py-1 text-xs rounded border">Categories</button>
+            <button id="tab-search" class="tab-btn tab-btn-active px-3 py-1 text-xs rounded">Search</button>
+            <button id="tab-categories" class="tab-btn px-3 py-1 text-xs rounded border">Categories</button>
+            <button id="tab-exemplars" class="tab-btn px-3 py-1 text-xs rounded border">Exemplars</button>
         </div>
 
         <div id="search-panel" class="p-3 space-y-2">
-            <input id="research-query" class="w-full border rounded px-2 py-1 text-sm" placeholder="Search case law..." />
-            <div class="flex gap-2">
-                <button id="run-search" class="flex-1 px-2 py-1 text-xs bg-gold text-navy rounded">Search</button>
-                <button id="run-suggest" class="flex-1 px-2 py-1 text-xs border rounded">Suggest from Selection</button>
+            <input id="research-query" class="w-full border rounded px-2 py-1 text-sm" placeholder="Search case law or ask a legal question..." />
+            <div class="grid grid-cols-3 gap-2">
+                <button id="run-search" class="px-2 py-1 text-xs bg-gold text-navy rounded">Search</button>
+                <button id="run-suggest" class="px-2 py-1 text-xs border rounded">Suggest Selection</button>
+                <button id="run-ask" class="px-2 py-1 text-xs border rounded">Ask</button>
             </div>
+            <p class="text-xs text-gray-500">Slash command available in editor: <code>/research</code></p>
         </div>
 
         <div id="categories-panel" class="p-3 hidden"></div>
-        <div id="results" class="p-3 space-y-2"></div>
 
-        <div id="case-panel" class="hidden absolute right-0 top-0 w-[400px] h-full bg-white border-l border-gray-200 overflow-y-auto z-20">
+        <div id="exemplar-panel" class="p-3 hidden space-y-3">
+            <div>
+                <div class="flex gap-2">
+                    <input id="exemplar-query" class="w-full border rounded px-2 py-1 text-sm" placeholder="Search exemplars..." />
+                    <button id="run-exemplar-search" class="px-2 py-1 text-xs border rounded">Search</button>
+                </div>
+                <div class="mt-2 flex gap-2">
+                    <button id="run-exemplar-suggest" class="px-2 py-1 text-xs bg-gold text-navy rounded">Suggest for This Doc</button>
+                </div>
+            </div>
+
+            <form id="exemplar-upload-form" class="border rounded p-2 space-y-2">
+                <div class="text-xs font-semibold text-gray-700">Upload Exemplar</div>
+                <input type="file" id="exemplar-file" name="file" class="w-full text-xs" accept=".pdf,.docx,.txt,.md,.rtf" required>
+                <input type="text" id="exemplar-title" name="title" class="w-full border rounded px-2 py-1 text-xs" placeholder="Title (optional)">
+                <div class="grid grid-cols-2 gap-2">
+                    <select id="exemplar-document-type" name="document_type_id" class="border rounded px-2 py-1 text-xs">
+                        <option value="">Document type</option>
+                        {% for dt in document_types %}
+                        <option value="{{ dt.id }}">{{ dt.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <select id="exemplar-outcome" name="outcome" class="border rounded px-2 py-1 text-xs">
+                        <option value="unknown">Outcome unknown</option>
+                        <option value="approved">Approved</option>
+                        <option value="denied">Denied</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                </div>
+                <input type="text" id="exemplar-case-type" name="case_type" class="w-full border rounded px-2 py-1 text-xs" placeholder="Case type (e.g., asylum)">
+                <input type="text" id="exemplar-tags" name="tags" class="w-full border rounded px-2 py-1 text-xs" placeholder="Tags (comma separated)">
+                <button type="submit" class="w-full px-2 py-1 text-xs bg-navy text-white rounded">Upload</button>
+            </form>
+        </div>
+
+        <div id="results" class="p-3 space-y-2"></div>
+        <div id="exemplar-results" class="p-3 space-y-2 hidden"></div>
+
+        <div id="case-panel" class="hidden absolute right-0 top-0 w-[420px] h-full bg-white border-l border-gray-200 overflow-y-auto z-20">
             <div class="p-3 border-b flex justify-between items-center">
                 <button id="case-back" class="text-xs text-navy">← Back to results</button>
                 <button id="insert-citation-top" class="text-xs bg-gold text-navy px-2 py-1 rounded">Insert Citation</button>
             </div>
             <div id="case-detail" class="p-3 text-sm"></div>
         </div>
+
+        <div id="exemplar-detail-panel" class="hidden absolute right-0 top-0 w-[420px] h-full bg-white border-l border-gray-200 overflow-y-auto z-20">
+            <div class="p-3 border-b flex justify-between items-center">
+                <button id="exemplar-back" class="text-xs text-navy">← Back to exemplars</button>
+                <button id="insert-exemplar-text" class="text-xs bg-gold text-navy px-2 py-1 rounded">Insert Excerpt</button>
+            </div>
+            <div id="exemplar-detail" class="p-3 text-sm"></div>
+        </div>
     </aside>
 </div>
+
+<div id="versions-modal" class="hidden fixed inset-0 z-30 bg-black/30 items-center justify-center">
+    <div class="bg-white rounded-lg shadow-xl w-[640px] max-w-[95vw] max-h-[80vh] overflow-hidden">
+        <div class="px-4 py-3 border-b flex justify-between items-center">
+            <h3 class="font-semibold text-navy">Version History</h3>
+            <button id="close-versions" class="text-gray-500 hover:text-gray-700">✕</button>
+        </div>
+        <div class="px-4 py-3 border-b flex items-center gap-2">
+            <input id="snapshot-label" class="border rounded px-2 py-1 text-sm flex-1" placeholder="Snapshot label (optional)">
+            <button id="save-snapshot" class="bg-navy text-white px-3 py-1 rounded text-sm">Save Snapshot</button>
+        </div>
+        <div id="versions-list" class="p-4 space-y-2 overflow-y-auto" style="max-height:50vh;"></div>
+    </div>
+</div>
+
+{{ document.content|json_script:"initial-doc-content" }}
 {% endblock %}
 
 {% block extra_scripts %}
-<script type="importmap">{"imports":{"@tiptap/core":"https://esm.sh/@tiptap/core@2.11.5","@tiptap/starter-kit":"https://esm.sh/@tiptap/starter-kit@2.11.5","@tiptap/extension-underline":"https://esm.sh/@tiptap/extension-underline@2.11.5","@tiptap/extension-placeholder":"https://esm.sh/@tiptap/extension-placeholder@2.11.5"}}</script>
+<script type="importmap">{"imports":{
+  "@tiptap/core":"https://esm.sh/@tiptap/core@2.11.5",
+  "@tiptap/starter-kit":"https://esm.sh/@tiptap/starter-kit@2.11.5",
+  "@tiptap/extension-underline":"https://esm.sh/@tiptap/extension-underline@2.11.5",
+  "@tiptap/extension-placeholder":"https://esm.sh/@tiptap/extension-placeholder@2.11.5",
+  "@tiptap/extension-table":"https://esm.sh/@tiptap/extension-table@2.11.5",
+  "@tiptap/extension-table-row":"https://esm.sh/@tiptap/extension-table-row@2.11.5",
+  "@tiptap/extension-table-cell":"https://esm.sh/@tiptap/extension-table-cell@2.11.5",
+  "@tiptap/extension-table-header":"https://esm.sh/@tiptap/extension-table-header@2.11.5",
+  "@tiptap/extension-superscript":"https://esm.sh/@tiptap/extension-superscript@2.11.5"
+}}</script>
 <script type="module">
-import { Editor } from '@tiptap/core';
+import { Editor, Node } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Placeholder from '@tiptap/extension-placeholder';
+import Table from '@tiptap/extension-table';
+import TableRow from '@tiptap/extension-table-row';
+import TableCell from '@tiptap/extension-table-cell';
+import TableHeader from '@tiptap/extension-table-header';
+import Superscript from '@tiptap/extension-superscript';
 
 const docId = '{{ document.id }}';
 const csrfToken = '{{ csrf_token }}';
 let currentCase = null;
+let currentExemplar = null;
+let footnoteCounter = 1;
+let versionsLoaded = false;
+
+const PageBreak = Node.create({
+  name: 'pageBreak',
+  group: 'block',
+  selectable: true,
+  parseHTML() { return [{ tag: 'hr[data-page-break]' }]; },
+  renderHTML() { return ['hr', { 'data-page-break': 'true', class: 'page-break-node' }]; },
+  addCommands() {
+    return {
+      setPageBreak: () => ({ commands }) => commands.insertContent({ type: this.name }),
+    };
+  },
+});
 
 let initialContent;
-try { initialContent = JSON.parse('{{ document.content|escapejs }}'); }
-catch { initialContent = { type: 'doc', content: [{ type: 'paragraph' }] }; }
+try {
+  initialContent = JSON.parse(document.getElementById('initial-doc-content').textContent);
+} catch {
+  initialContent = { type: 'doc', content: [{ type: 'paragraph' }] };
+}
 
 const editor = new Editor({
   element: document.getElementById('editor'),
-  extensions: [StarterKit, Underline, Placeholder.configure({ placeholder: 'Start writing...' })],
+  extensions: [
+    StarterKit,
+    Underline,
+    Superscript,
+    Placeholder.configure({ placeholder: 'Start writing...' }),
+    Table.configure({ resizable: true }),
+    TableRow,
+    TableHeader,
+    TableCell,
+    PageBreak,
+  ],
   content: initialContent,
   editorProps: { attributes: { class: 'tiptap-editor' } },
 });
@@ -125,37 +243,95 @@ const editor = new Editor({
 const saveStatus = document.getElementById('save-status');
 let saveTimeout = null;
 let isSaving = false;
-async function saveContent() {
+
+async function saveContent(opts = {}) {
   if (isSaving) return;
   isSaving = true;
   saveStatus.textContent = 'Saving...';
   try {
-    const response = await fetch(`/api/save/${docId}/`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, body: JSON.stringify({ content: editor.getJSON() }) });
+    const response = await fetch(`/api/save/${docId}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({
+        content: editor.getJSON(),
+        force_snapshot: !!opts.forceSnapshot,
+        snapshot_label: opts.snapshotLabel || '',
+      }),
+    });
     saveStatus.textContent = response.ok ? 'Saved' : 'Error saving';
-  } catch { saveStatus.textContent = 'Error saving'; }
+  } catch {
+    saveStatus.textContent = 'Error saving';
+  }
   isSaving = false;
 }
-editor.on('update', () => { clearTimeout(saveTimeout); saveStatus.textContent = 'Unsaved changes'; saveTimeout = setTimeout(saveContent, 3000); updateToolbar(); });
+
+editor.on('update', () => {
+  clearTimeout(saveTimeout);
+  saveStatus.textContent = 'Unsaved changes';
+  saveTimeout = setTimeout(() => saveContent(), 3000);
+  updateToolbar();
+});
+
+function maybeHandleResearchSlash() {
+  const { from } = editor.state.selection;
+  const start = Math.max(1, from - 20);
+  const textBefore = editor.state.doc.textBetween(start, from, ' ');
+  const match = textBefore.match(/\/research\s?$/);
+  if (!match) return;
+  const deleteFrom = from - match[0].length;
+  editor.chain().focus().deleteRange({ from: deleteFrom, to: from }).run();
+  openSidebar();
+  setTab('search');
+}
+
+editor.view.dom.addEventListener('keydown', (e) => {
+  if (e.key === ' ' || e.key === 'Enter') {
+    setTimeout(maybeHandleResearchSlash, 0);
+  }
+});
 
 document.getElementById('doc-title').addEventListener('input', (() => {
   let timeout = null;
   return () => {
     clearTimeout(timeout);
     timeout = setTimeout(async () => {
-      await fetch(`/api/title/${docId}/`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, body: JSON.stringify({ title: document.getElementById('doc-title').value }) });
+      await fetch(`/api/title/${docId}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+        body: JSON.stringify({ title: document.getElementById('doc-title').value }),
+      });
     }, 800);
   };
 })());
+
+function insertFootnote() {
+  const note = window.prompt('Footnote text:');
+  if (!note) return;
+  const idx = footnoteCounter++;
+  editor.chain().focus().insertContent([
+    { type: 'text', text: `[${idx}]`, marks: [{ type: 'superscript' }] },
+  ]).run();
+  const endPos = editor.state.doc.content.size;
+  editor.chain().insertContentAt(endPos, [
+    { type: 'paragraph', content: [{ type: 'text', text: `[${idx}] ${note}` }] },
+  ]).run();
+}
 
 document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('click', () => {
   const a = btn.dataset.action;
   if (a === 'bold') editor.chain().focus().toggleBold().run();
   if (a === 'italic') editor.chain().focus().toggleItalic().run();
   if (a === 'underline') editor.chain().focus().toggleUnderline().run();
-  if (a === 'heading') editor.chain().focus().toggleHeading({ level: parseInt(btn.dataset.level) }).run();
+  if (a === 'heading') editor.chain().focus().toggleHeading({ level: parseInt(btn.dataset.level, 10) }).run();
   if (a === 'bulletList') editor.chain().focus().toggleBulletList().run();
   if (a === 'orderedList') editor.chain().focus().toggleOrderedList().run();
   if (a === 'blockquote') editor.chain().focus().toggleBlockquote().run();
+  if (a === 'insertTable') editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+  if (a === 'addRow') editor.chain().focus().addRowAfter().run();
+  if (a === 'addColumn') editor.chain().focus().addColumnAfter().run();
+  if (a === 'deleteTable') editor.chain().focus().deleteTable().run();
+  if (a === 'footnote') insertFootnote();
+  if (a === 'pageBreak') editor.chain().focus().setPageBreak().run();
   if (a === 'undo') editor.chain().focus().undo().run();
   if (a === 'redo') editor.chain().focus().redo().run();
   updateToolbar();
@@ -168,17 +344,24 @@ function updateToolbar() {
       (a === 'bold' && editor.isActive('bold')) ||
       (a === 'italic' && editor.isActive('italic')) ||
       (a === 'underline' && editor.isActive('underline')) ||
-      (a === 'heading' && editor.isActive('heading', { level: parseInt(btn.dataset.level) })) ||
+      (a === 'heading' && editor.isActive('heading', { level: parseInt(btn.dataset.level || '1', 10) })) ||
       (a === 'bulletList' && editor.isActive('bulletList')) ||
       (a === 'orderedList' && editor.isActive('orderedList')) ||
-      (a === 'blockquote' && editor.isActive('blockquote')));
+      (a === 'blockquote' && editor.isActive('blockquote')) ||
+      (a === 'insertTable' && editor.isActive('table')));
   });
 }
 editor.on('selectionUpdate', updateToolbar);
 
 const shell = document.getElementById('editor-shell');
-document.getElementById('research-toggle').addEventListener('click', () => shell.classList.toggle('research-open'));
-document.getElementById('research-close').addEventListener('click', () => shell.classList.remove('research-open'));
+function openSidebar() { shell.classList.add('research-open'); }
+function closeSidebar() {
+  shell.classList.remove('research-open');
+  document.getElementById('case-panel').classList.add('hidden');
+  document.getElementById('exemplar-detail-panel').classList.add('hidden');
+}
+document.getElementById('research-toggle').addEventListener('click', openSidebar);
+document.getElementById('research-close').addEventListener('click', closeSidebar);
 
 function validityBadge(status) {
   if (status === 'good_law') return '<span class="text-green-700">✅ good law</span>';
@@ -189,38 +372,26 @@ function validityBadge(status) {
 
 function caseCard(item) {
   const holding = item.holding || item.summary || '';
+  const escaped = JSON.stringify(item).replace(/'/g, '&#39;');
   return `<div class="border rounded p-2 hover:border-navy bg-white">
-    <button class="case-open text-left w-full text-sm font-semibold text-navy" data-id="${item.document_id}">${item.case_name}</button>
+    <button class="case-open text-left w-full text-sm font-semibold text-navy" data-id="${item.document_id}">${item.case_name || 'Unknown case'}</button>
     <div class="text-xs text-gray-600">${item.citation || ''}</div>
     <div class="text-xs">${validityBadge(item.validity_status)}</div>
-    <div class="text-xs text-gray-700 mt-1">${holding.slice(0, 200)}</div>
+    <div class="text-xs text-gray-700 mt-1">${holding.slice(0, 220)}</div>
     <div class="mt-2 flex gap-2">
-      <button class="insert-citation text-xs bg-gold text-navy px-2 py-1 rounded" data-case='${JSON.stringify(item).replace(/'/g, "&#39;")}'>Insert Citation</button>
+      <button class="insert-citation text-xs bg-gold text-navy px-2 py-1 rounded" data-case='${escaped}'>Insert Citation</button>
       <button class="similar text-xs border px-2 py-1 rounded" data-id="${item.document_id}">Find Similar</button>
     </div>
   </div>`;
 }
 
-async function runSuggest(text) {
-  const res = await fetch('/api/research/suggest/', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken }, body: JSON.stringify({ text }) });
-  const data = await res.json();
-  renderResults(data.results || []);
-}
-
-async function runCategory(id) {
-  const res = await fetch(`/api/research/category/${id}/`);
-  const data = await res.json();
-  renderResults(data.results || []);
-}
-
 function renderResults(items) {
   const node = document.getElementById('results');
+  node.classList.remove('hidden');
+  document.getElementById('exemplar-results').classList.add('hidden');
   node.innerHTML = items.length ? items.map(caseCard).join('') : '<div class="text-xs text-gray-500">No results.</div>';
-  node.querySelectorAll('.insert-citation').forEach(btn => btn.addEventListener('click', () => {
-    const item = JSON.parse(btn.dataset.case);
-    insertCitation(item);
-  }));
-  node.querySelectorAll('.case-open').forEach(btn => btn.addEventListener('click', async () => openCase(btn.dataset.id)));
+  node.querySelectorAll('.insert-citation').forEach(btn => btn.addEventListener('click', () => insertCitation(JSON.parse(btn.dataset.case))));
+  node.querySelectorAll('.case-open').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
   node.querySelectorAll('.similar').forEach(btn => btn.addEventListener('click', async () => {
     const res = await fetch(`/api/research/similar/${btn.dataset.id}/`);
     const data = await res.json();
@@ -228,13 +399,81 @@ function renderResults(items) {
   }));
 }
 
-function insertCitation(item) {
-  const year = item.decision_date ? new Date(item.decision_date).getUTCFullYear() : '';
-  const courtYear = item.court && year ? ` (${item.court} ${year})` : '';
-  editor.chain().focus().insertContent([{ type: 'text', text: item.case_name || '', marks: [{ type: 'italic' }] }, { type: 'text', text: `, ${item.citation || ''}${courtYear}` }]).run();
+function renderAskAnswer(payload) {
+  const answer = payload.answer || 'No answer returned.';
+  const citations = payload.citations || [];
+  const node = document.getElementById('results');
+  document.getElementById('exemplar-results').classList.add('hidden');
+  node.classList.remove('hidden');
+  node.innerHTML = `
+    <div class="border rounded p-3 bg-white">
+      <h4 class="text-sm font-semibold text-navy mb-2">Answer</h4>
+      <pre class="whitespace-pre-wrap text-xs text-gray-800">${answer}</pre>
+    </div>
+    <div class="border rounded p-3 bg-white">
+      <h4 class="text-sm font-semibold text-navy mb-2">Citations</h4>
+      <div class="space-y-2">
+        ${citations.map((c, idx) => `
+          <div class="text-xs border rounded p-2">
+            <div class="font-semibold">[${idx + 1}] ${c.case_name || 'Unknown case'}</div>
+            <div class="text-gray-600">${c.citation || ''}</div>
+            <div class="mt-1 flex gap-2">
+              <button class="ask-open-case border rounded px-2 py-0.5" data-id="${c.document_id}">Open Case</button>
+              <button class="ask-insert-case border rounded px-2 py-0.5" data-case='${JSON.stringify(c).replace(/'/g, '&#39;')}'>Insert Citation</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+
+  node.querySelectorAll('.ask-open-case').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
+  node.querySelectorAll('.ask-insert-case').forEach(btn => btn.addEventListener('click', () => insertCitation(JSON.parse(btn.dataset.case))));
 }
 
-document.getElementById('insert-citation-top').addEventListener('click', () => { if (currentCase) insertCitation(currentCase); });
+async function runSuggest(text) {
+  const res = await fetch('/api/research/suggest/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+    body: JSON.stringify({ text }),
+  });
+  const data = await res.json();
+  renderResults(data.results || []);
+}
+
+async function runAsk(question) {
+  const res = await fetch('/api/research/ask/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+    body: JSON.stringify({ question }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    renderAskAnswer({ answer: data.error || 'Unable to answer this question.', citations: [] });
+    return;
+  }
+  renderAskAnswer(data);
+}
+
+async function runCategory(slug) {
+  const res = await fetch(`/api/research/category/${encodeURIComponent(slug)}/`);
+  const data = await res.json();
+  renderResults(data.results || []);
+}
+
+function insertCitation(item) {
+  const date = item.decision_date || item.date || null;
+  const year = date ? new Date(date).getUTCFullYear() : '';
+  const court = item.court || '';
+  const courtYear = court && year ? ` (${court} ${year})` : (court || year ? ` (${court}${year ? ` ${year}` : ''})` : '');
+  editor.chain().focus().insertContent([
+    { type: 'text', text: item.case_name || '', marks: [{ type: 'italic' }] },
+    { type: 'text', text: `, ${item.citation || ''}${courtYear}` },
+  ]).run();
+}
+
+document.getElementById('insert-citation-top').addEventListener('click', () => {
+  if (currentCase) insertCitation(currentCase);
+});
 
 async function openCase(docId) {
   const res = await fetch(`/api/research/case/${docId}/`);
@@ -242,7 +481,7 @@ async function openCase(docId) {
   currentCase = data;
   document.getElementById('case-panel').classList.remove('hidden');
   document.getElementById('case-detail').innerHTML = `
-    <h4 class="font-semibold text-navy">${data.case_name}</h4>
+    <h4 class="font-semibold text-navy">${data.case_name || ''}</h4>
     <div class="text-xs text-gray-600">${data.citation || ''}</div>
     <div class="text-xs mt-1">${validityBadge(data.validity?.status)}</div>
     <h5 class="mt-3 font-semibold text-xs text-gray-700">Holdings</h5>
@@ -253,26 +492,250 @@ async function openCase(docId) {
 
 document.getElementById('case-back').addEventListener('click', () => document.getElementById('case-panel').classList.add('hidden'));
 
+function setTab(tabName) {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.remove('tab-btn-active');
+    btn.classList.add('border');
+  });
+
+  const searchPanel = document.getElementById('search-panel');
+  const categoriesPanel = document.getElementById('categories-panel');
+  const exemplarPanel = document.getElementById('exemplar-panel');
+  const researchResults = document.getElementById('results');
+  const exemplarResults = document.getElementById('exemplar-results');
+
+  searchPanel.classList.add('hidden');
+  categoriesPanel.classList.add('hidden');
+  exemplarPanel.classList.add('hidden');
+
+  if (tabName === 'search') {
+    document.getElementById('tab-search').classList.add('tab-btn-active');
+    document.getElementById('tab-search').classList.remove('border');
+    searchPanel.classList.remove('hidden');
+    researchResults.classList.remove('hidden');
+    exemplarResults.classList.add('hidden');
+  }
+  if (tabName === 'categories') {
+    document.getElementById('tab-categories').classList.add('tab-btn-active');
+    document.getElementById('tab-categories').classList.remove('border');
+    categoriesPanel.classList.remove('hidden');
+    researchResults.classList.remove('hidden');
+    exemplarResults.classList.add('hidden');
+    loadCategories();
+  }
+  if (tabName === 'exemplars') {
+    document.getElementById('tab-exemplars').classList.add('tab-btn-active');
+    document.getElementById('tab-exemplars').classList.remove('border');
+    exemplarPanel.classList.remove('hidden');
+    researchResults.classList.add('hidden');
+    exemplarResults.classList.remove('hidden');
+    if (!document.getElementById('exemplar-results').dataset.loaded) {
+      suggestExemplarsForDocument();
+    }
+  }
+}
+
+async function loadCategories() {
+  const res = await fetch('/api/research/categories/');
+  const data = await res.json();
+  document.getElementById('categories-panel').innerHTML = (data.categories || []).map(c => `
+    <button class="cat-btn w-full text-left text-sm p-2 border-b hover:bg-gray-50" data-slug="${c.slug}">
+      <div class="font-medium">${c.name}</div>
+      <div class="text-xs text-gray-500">${c.description || ''}</div>
+    </button>
+  `).join('');
+  document.querySelectorAll('.cat-btn').forEach(btn => btn.addEventListener('click', () => runCategory(btn.dataset.slug)));
+}
+
 document.getElementById('run-search').addEventListener('click', () => runSuggest(document.getElementById('research-query').value));
 document.getElementById('run-suggest').addEventListener('click', () => {
   const selected = editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, ' ');
-  runSuggest(selected || editor.getText().slice(0, 1000));
+  runSuggest(selected || editor.getText().slice(0, 1200));
+});
+document.getElementById('run-ask').addEventListener('click', () => {
+  const question = document.getElementById('research-query').value.trim();
+  if (!question) return;
+  runAsk(question);
 });
 
-document.getElementById('tab-search').addEventListener('click', () => {
-  document.getElementById('search-panel').classList.remove('hidden');
-  document.getElementById('categories-panel').classList.add('hidden');
-});
-document.getElementById('tab-categories').addEventListener('click', async () => {
-  document.getElementById('search-panel').classList.add('hidden');
-  document.getElementById('categories-panel').classList.remove('hidden');
-  const res = await fetch('/api/research/categories/');
+document.getElementById('tab-search').addEventListener('click', () => setTab('search'));
+document.getElementById('tab-categories').addEventListener('click', () => setTab('categories'));
+document.getElementById('tab-exemplars').addEventListener('click', () => setTab('exemplars'));
+
+function exemplarCard(item) {
+  return `<div class="border rounded p-2 bg-white hover:border-navy">
+    <button class="exemplar-open text-left w-full text-sm font-semibold text-navy" data-id="${item.id}">${item.title}</button>
+    <div class="text-xs text-gray-600">${item.document_type || 'No type'} · ${item.case_type || 'No case type'}</div>
+    <div class="text-xs mt-1">Outcome: ${item.outcome || 'unknown'}</div>
+    <div class="text-xs text-gray-700 mt-1">${(item.snippet || '').slice(0, 220)}</div>
+    <div class="mt-2 flex gap-2">
+      <button class="exemplar-insert border rounded px-2 py-0.5 text-xs" data-id="${item.id}">Insert Excerpt</button>
+    </div>
+  </div>`;
+}
+
+function renderExemplarResults(items) {
+  const node = document.getElementById('exemplar-results');
+  node.dataset.loaded = '1';
+  node.innerHTML = items.length ? items.map(exemplarCard).join('') : '<div class="text-xs text-gray-500">No exemplars found.</div>';
+  node.querySelectorAll('.exemplar-open').forEach(btn => btn.addEventListener('click', () => openExemplar(btn.dataset.id)));
+  node.querySelectorAll('.exemplar-insert').forEach(btn => btn.addEventListener('click', async () => {
+    const detail = await getExemplarDetail(btn.dataset.id);
+    insertExemplarText(detail.extracted_text || detail.snippet || '');
+  }));
+}
+
+async function searchExemplars(query) {
+  const res = await fetch(`/api/exemplars/search/?q=${encodeURIComponent(query || '')}`);
   const data = await res.json();
-  document.getElementById('categories-panel').innerHTML = (data.categories || []).map(c => `<button class="cat-btn w-full text-left text-sm p-2 border-b hover:bg-gray-50" data-id="${c.id}">${c.name}</button>`).join('');
-  document.querySelectorAll('.cat-btn').forEach(btn => btn.addEventListener('click', () => runCategory(btn.dataset.id)));
+  renderExemplarResults(data.results || []);
+}
+
+async function suggestExemplarsForDocument() {
+  const res = await fetch(`/api/exemplars/suggest/${docId}/`);
+  const data = await res.json();
+  renderExemplarResults(data.results || []);
+}
+
+async function getExemplarDetail(exemplarId) {
+  const res = await fetch(`/api/exemplars/${exemplarId}/`);
+  return await res.json();
+}
+
+async function openExemplar(exemplarId) {
+  const data = await getExemplarDetail(exemplarId);
+  currentExemplar = data;
+  document.getElementById('exemplar-detail-panel').classList.remove('hidden');
+  document.getElementById('exemplar-detail').innerHTML = `
+    <h4 class="font-semibold text-navy">${data.title || ''}</h4>
+    <div class="text-xs text-gray-600">${data.document_type || ''} · ${data.case_type || ''}</div>
+    <div class="text-xs mt-1">Outcome: ${data.outcome || 'unknown'}</div>
+    <h5 class="mt-3 font-semibold text-xs text-gray-700">Extracted Text</h5>
+    <pre class="whitespace-pre-wrap text-xs bg-gray-50 p-2 rounded mt-1">${(data.extracted_text || '').slice(0, 30000)}</pre>`;
+}
+
+function insertExemplarText(text) {
+  if (!text) return;
+  const excerpt = text.length > 1800 ? `${text.slice(0, 1800)}...` : text;
+  editor.chain().focus().insertContent(excerpt).run();
+}
+
+document.getElementById('insert-exemplar-text').addEventListener('click', () => {
+  if (currentExemplar) insertExemplarText(currentExemplar.extracted_text || currentExemplar.snippet || '');
+});
+document.getElementById('exemplar-back').addEventListener('click', () => document.getElementById('exemplar-detail-panel').classList.add('hidden'));
+
+const exemplarForm = document.getElementById('exemplar-upload-form');
+exemplarForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const formData = new FormData();
+  const fileInput = document.getElementById('exemplar-file');
+  if (!fileInput.files.length) return;
+
+  formData.append('file', fileInput.files[0]);
+  formData.append('title', document.getElementById('exemplar-title').value);
+  formData.append('document_type_id', document.getElementById('exemplar-document-type').value);
+  formData.append('outcome', document.getElementById('exemplar-outcome').value);
+  formData.append('case_type', document.getElementById('exemplar-case-type').value);
+  formData.append('tags', document.getElementById('exemplar-tags').value);
+
+  const res = await fetch('/api/exemplars/upload/', {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const data = await res.json();
+    window.alert(data.error || 'Upload failed');
+    return;
+  }
+
+  exemplarForm.reset();
+  await suggestExemplarsForDocument();
 });
 
-document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); clearTimeout(saveTimeout); saveContent(); } });
-window.addEventListener('beforeunload', () => { if (saveTimeout) saveContent(); });
+document.getElementById('run-exemplar-search').addEventListener('click', () => {
+  searchExemplars(document.getElementById('exemplar-query').value);
+});
+document.getElementById('run-exemplar-suggest').addEventListener('click', suggestExemplarsForDocument);
+
+function renderVersions(items) {
+  const node = document.getElementById('versions-list');
+  if (!items.length) {
+    node.innerHTML = '<div class="text-sm text-gray-500">No snapshots yet.</div>';
+    return;
+  }
+  node.innerHTML = items.map(v => `
+    <div class="border rounded px-3 py-2 flex items-center justify-between">
+      <div>
+        <div class="text-sm font-medium">${v.label || 'Snapshot'}</div>
+        <div class="text-xs text-gray-500">${new Date(v.created_at).toLocaleString()}</div>
+      </div>
+      <button class="restore-version border rounded px-2 py-1 text-xs" data-id="${v.id}">Restore</button>
+    </div>
+  `).join('');
+  node.querySelectorAll('.restore-version').forEach(btn => btn.addEventListener('click', () => restoreVersion(btn.dataset.id)));
+}
+
+async function loadVersions() {
+  const res = await fetch(`/api/versions/${docId}/`);
+  const data = await res.json();
+  renderVersions(data.versions || []);
+}
+
+async function createSnapshot() {
+  const label = document.getElementById('snapshot-label').value.trim();
+  await fetch(`/api/snapshot/${docId}/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+    body: JSON.stringify({ label }),
+  });
+  document.getElementById('snapshot-label').value = '';
+  await loadVersions();
+}
+
+async function restoreVersion(versionId) {
+  if (!window.confirm('Restore this version? Current content will be replaced.')) return;
+  const res = await fetch(`/api/restore/${docId}/${versionId}/`, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    window.alert(data.error || 'Unable to restore version');
+    return;
+  }
+  editor.commands.setContent(data.content || { type: 'doc', content: [{ type: 'paragraph' }] });
+  saveStatus.textContent = 'Restored';
+  await loadVersions();
+}
+
+const versionsModal = document.getElementById('versions-modal');
+document.getElementById('open-versions').addEventListener('click', async () => {
+  versionsModal.classList.remove('hidden');
+  versionsModal.classList.add('flex');
+  await loadVersions();
+  versionsLoaded = true;
+});
+document.getElementById('close-versions').addEventListener('click', () => {
+  versionsModal.classList.add('hidden');
+  versionsModal.classList.remove('flex');
+});
+document.getElementById('save-snapshot').addEventListener('click', createSnapshot);
+
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    clearTimeout(saveTimeout);
+    saveContent({ forceSnapshot: false });
+  }
+});
+window.addEventListener('beforeunload', () => {
+  if (saveTimeout) saveContent();
+});
+
+setTab('search');
+updateToolbar();
 </script>
 {% endblock %}

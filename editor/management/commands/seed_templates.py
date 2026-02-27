@@ -1,6 +1,8 @@
 """
 Seed document templates with real, useful Tiptap JSON content.
 """
+import os
+
 from django.core.management.base import BaseCommand
 from editor.models import DocumentType
 
@@ -58,6 +60,39 @@ def _bullet_list(items):
 
 def _hr():
     return {"type": "horizontalRule"}
+
+
+def _basic_template_content(title, sections, salutation="Dear Officer:"):
+    content = [
+        _p("[Date]"),
+        _p(""),
+        _p("[Agency / Court Name]"),
+        _p("[Address Line 1]"),
+        _p("[Address Line 2]"),
+        _p(""),
+        _h(title, 1),
+        _p(""),
+        _p(salutation),
+        _p(""),
+    ]
+    for heading in sections:
+        content.extend([
+            _h(heading, 2),
+            _p(f"[Draft {heading.lower()} for this matter.]"),
+            _p(""),
+        ])
+
+    content.extend([
+        _h("Conclusion", 2),
+        _p("[Summarize the request and relief sought.]"),
+        _p(""),
+        _p("Respectfully submitted,"),
+        _p(""),
+        _p(""),
+        _p("Chris Hammond"),
+        _p("Hammond Law, PLLC"),
+    ])
+    return {"type": "doc", "content": content}
 
 
 TEMPLATES = [
@@ -641,6 +676,170 @@ TEMPLATES = [
 ]
 
 
+ADDITIONAL_TEMPLATE_DEFS = [
+    {
+        "name": "I-485 Cover Letter",
+        "slug": "i-485-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "🧾",
+        "description": "Cover letter for I-485 Adjustment of Status package",
+        "sections": [
+            "Case Summary",
+            "Eligibility and Procedural Posture",
+            "Enclosed Documentation",
+        ],
+    },
+    {
+        "name": "I-612 Cover Letter",
+        "slug": "i-612-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "📬",
+        "description": "Cover letter for I-612 waiver filing",
+        "sections": [
+            "Applicant Background",
+            "Waiver Basis",
+            "Supporting Evidence",
+        ],
+    },
+    {
+        "name": "I-601 Cover Letter",
+        "slug": "i-601-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "📨",
+        "description": "Cover letter for Form I-601 waiver filing",
+        "sections": [
+            "Ground of Inadmissibility",
+            "Qualifying Relative Hardship",
+            "Evidence Index",
+        ],
+    },
+    {
+        "name": "I-601A Cover Letter",
+        "slug": "i-601a-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "📨",
+        "description": "Cover letter for Form I-601A provisional waiver filing",
+        "sections": [
+            "Case Background",
+            "Eligibility for Provisional Waiver",
+            "Evidence Index",
+        ],
+    },
+    {
+        "name": "N-400 Cover Letter",
+        "slug": "n-400-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "🗂️",
+        "description": "Cover letter for N-400 naturalization filing",
+        "sections": [
+            "Applicant Eligibility",
+            "Good Moral Character Evidence",
+            "Exhibits",
+        ],
+    },
+    {
+        "name": "B-2 Cover Letter",
+        "slug": "b2-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "✈️",
+        "description": "Support letter for B-2 visitor visa filing",
+        "sections": [
+            "Purpose of Travel",
+            "Ties to Home Country",
+            "Financial Support and Logistics",
+        ],
+    },
+    {
+        "name": "Affirmative Asylum Brief",
+        "slug": "affirmative-asylum-brief",
+        "category": "brief",
+        "export_format": "court_brief",
+        "icon": "🛡️",
+        "description": "Supporting brief for affirmative asylum filing",
+        "sections": [
+            "Statement of Facts",
+            "Legal Standard",
+            "Argument",
+        ],
+    },
+    {
+        "name": "Cancellation of Removal Brief",
+        "slug": "cancellation-removal-brief",
+        "category": "brief",
+        "export_format": "court_brief",
+        "icon": "🏛️",
+        "description": "Brief supporting cancellation of removal relief",
+        "sections": [
+            "Statutory Eligibility",
+            "Exceptional and Extremely Unusual Hardship",
+            "Discretionary Factors",
+        ],
+    },
+    {
+        "name": "Appeal Brief (BIA)",
+        "slug": "appeal-brief-bia",
+        "category": "brief",
+        "export_format": "court_brief",
+        "icon": "📚",
+        "description": "Brief on appeal before the Board of Immigration Appeals",
+        "sections": [
+            "Standard of Review",
+            "Errors by the Immigration Judge",
+            "Requested Relief",
+        ],
+    },
+    {
+        "name": "Expert Witness Letter",
+        "slug": "expert-witness-letter",
+        "category": "other",
+        "export_format": "cover_letter",
+        "icon": "🧪",
+        "description": "Request letter for expert declaration or testimony",
+        "sections": [
+            "Case Context",
+            "Requested Expert Scope",
+            "Deliverables and Deadline",
+        ],
+    },
+    {
+        "name": "NOID Response",
+        "slug": "noid-response",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "📮",
+        "description": "Response template for Notice of Intent to Deny",
+        "sections": [
+            "NOID Issues Presented",
+            "Response and Supporting Evidence",
+            "Legal Authority",
+        ],
+    },
+]
+
+
+for idx, template in enumerate(ADDITIONAL_TEMPLATE_DEFS, start=9):
+    TEMPLATES.append(
+        {
+            "name": template["name"],
+            "slug": template["slug"],
+            "category": template["category"],
+            "export_format": template["export_format"],
+            "icon": template["icon"],
+            "order": idx,
+            "description": template["description"],
+            "template_content": _basic_template_content(
+                template["name"].upper(), template["sections"]
+            ),
+        }
+    )
+
+
 PHASE1_SLUGS = {
     "i-130-cover-letter",
     "defensive-asylum-brief",
@@ -653,10 +852,23 @@ class Command(BaseCommand):
     help = "Seed document templates"
 
     def handle(self, *args, **options):
+        phase1_only = os.environ.get("SEED_PHASE1_ONLY", "False").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        if phase1_only:
+            templates_to_seed = [t for t in TEMPLATES if t["slug"] in PHASE1_SLUGS]
+            allowed_slugs = set(PHASE1_SLUGS)
+        else:
+            templates_to_seed = TEMPLATES
+            allowed_slugs = {t["slug"] for t in TEMPLATES}
+
         created = 0
         updated = 0
-        DocumentType.objects.exclude(slug__in=PHASE1_SLUGS).delete()
-        for t in [t for t in TEMPLATES if t["slug"] in PHASE1_SLUGS]:
+        DocumentType.objects.exclude(slug__in=allowed_slugs).delete()
+        for t in templates_to_seed:
             obj, was_created = DocumentType.objects.update_or_create(
                 slug=t["slug"],
                 defaults={
@@ -673,6 +885,10 @@ class Command(BaseCommand):
                 created += 1
             else:
                 updated += 1
+
+        mode = "Phase 1 only" if phase1_only else "Full template set"
         self.stdout.write(
-            self.style.SUCCESS(f"Templates: {created} created, {updated} updated")
+            self.style.SUCCESS(
+                f"Templates ({mode}): {created} created, {updated} updated"
+            )
         )
