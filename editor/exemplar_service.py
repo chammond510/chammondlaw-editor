@@ -1,10 +1,8 @@
 import os
+import math
 from pathlib import Path
 
-import numpy as np
-from docx import Document as DocxDocument
 from openai import OpenAI
-from pypdf import PdfReader
 
 
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -23,6 +21,8 @@ def extract_text_from_file(file_path):
 
 
 def _extract_pdf_text(file_path):
+    from pypdf import PdfReader
+
     reader = PdfReader(file_path)
     text_parts = []
     for page in reader.pages:
@@ -31,6 +31,8 @@ def _extract_pdf_text(file_path):
 
 
 def _extract_docx_text(file_path):
+    from docx import Document as DocxDocument
+
     doc = DocxDocument(file_path)
     paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     return "\n".join(paragraphs).strip()
@@ -53,12 +55,22 @@ def generate_embedding(text):
 def cosine_similarity(a, b):
     if not a or not b:
         return 0.0
-    vec_a = np.array(a, dtype=np.float32)
-    vec_b = np.array(b, dtype=np.float32)
-    denom = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for i in range(n):
+        x = float(a[i])
+        y = float(b[i])
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    denom = math.sqrt(norm_a) * math.sqrt(norm_b)
     if denom == 0:
         return 0.0
-    return float(np.dot(vec_a, vec_b) / denom)
+    return float(dot / denom)
 
 
 def rank_exemplars(query, exemplars):
