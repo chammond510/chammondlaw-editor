@@ -2,9 +2,6 @@ import os
 import math
 from pathlib import Path
 
-from openai import OpenAI
-
-
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 
@@ -46,6 +43,8 @@ def generate_embedding(text):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return []
+
+    from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
     resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text[:12000])

@@ -2,7 +2,6 @@ import os
 from collections import OrderedDict
 
 from django.db import connections
-from openai import OpenAI
 
 
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -15,6 +14,8 @@ def _openai_client(required=True):
         if required:
             raise ValueError("OPENAI_API_KEY is not configured")
         return None
+    from openai import OpenAI
+
     return OpenAI(api_key=api_key)
 
 
