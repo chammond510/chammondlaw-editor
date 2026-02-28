@@ -143,16 +143,46 @@ def api_versions(request, doc_id):
     versions = doc.versions.order_by("-created_at")[:100]
     return JsonResponse(
         {
-            "versions": [
-                {
-                    "id": v.id,
-                    "label": v.label,
-                    "created_at": v.created_at.isoformat(),
-                }
-                for v in versions
-            ]
+            "versions": [_version_payload(v, include_preview=True) for v in versions]
         }
     )
+
+
+@login_required
+@require_GET
+def api_version_detail(request, doc_id, version_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+    payload = _version_payload(version, include_preview=True)
+    payload["content"] = version.content
+    payload["full_text"] = _extract_plain_text(version.content, max_chars=50000)
+    payload["current_text"] = _extract_plain_text(doc.content, max_chars=50000)
+    return JsonResponse(payload)
+
+
+@login_required
+@require_POST
+def api_update_version_label(request, doc_id, version_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+    try:
+        data = json.loads(request.body or "{}")
+        label = (data.get("label") or "").strip()[:100]
+    except json.JSONDecodeError:
+        return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
+
+    version.label = label or "Snapshot"
+    version.save(update_fields=["label"])
+    return JsonResponse({"status": "ok", "version": _version_payload(version, include_preview=True)})
+
+
+@login_required
+@require_POST
+def api_delete_version(request, doc_id, version_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+    version.delete()
+    return JsonResponse({"status": "ok"})
 
 
 @login_required
@@ -233,3 +263,57 @@ def _prune_snapshots(doc):
     )
     if ids_to_keep:
         doc.versions.exclude(id__in=ids_to_keep).delete()
+
+
+def _version_payload(version, include_preview=False):
+    label = (version.label or "").strip()
+    text = _extract_plain_text(version.content, max_chars=20000)
+    payload = {
+        "id": version.id,
+        "label": label or "Snapshot",
+        "created_at": version.created_at.isoformat(),
+        "is_auto": label.lower().startswith("autosave"),
+        "is_restore_point": label.lower().startswith("before restore"),
+        "word_count": len([w for w in text.split() if w.strip()]),
+        "char_count": len(text),
+    }
+    if include_preview:
+        payload["preview"] = text[:400]
+    return payload
+
+
+def _extract_plain_text(content, max_chars=None):
+    parts = []
+
+    def walk(node):
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_type = node.get("type")
+        if node_type == "text":
+            parts.append(node.get("text", ""))
+        elif node_type == "hardBreak":
+            parts.append("\n")
+        elif node_type == "paragraph":
+            walk(node.get("content", []))
+            parts.append("\n")
+        elif node_type == "heading":
+            walk(node.get("content", []))
+            parts.append("\n")
+        elif node_type == "pageBreak":
+            parts.append("\n--- page break ---\n")
+        elif node_type == "footnoteReference":
+            number = node.get("attrs", {}).get("number") or "?"
+            parts.append(f"[{number}]")
+        else:
+            walk(node.get("content", []))
+
+    walk(content if isinstance(content, dict) else {})
+    text = "".join(parts).strip()
+    if max_chars is not None:
+        return text[:max_chars]
+    return text

@@ -19,9 +19,16 @@
     .toolbar-btn { transition: all 0.1s; }
     .toolbar-btn:hover { background-color: #e5e7eb; }
     .toolbar-btn.is-active { background-color: #1B2A4A; color: white; }
+    .footnote-ref-node { cursor: pointer; color: #1B2A4A; font-size: 0.85em; }
+    .footnote-ref-node:hover { text-decoration: underline; }
     .research-open #research-sidebar { width: 420px; opacity: 1; }
     #research-sidebar { width: 0; opacity: 0; transition: width 0.2s ease, opacity 0.2s ease; position: relative; }
     .tab-btn-active { background-color: #1B2A4A; color: white; }
+    .slash-item-active { background-color: #eef2ff; border-color: #c7d2fe; }
+    .version-item-active { border-color: #1B2A4A; background: #f8fafc; }
+    .diff-line-added { background: #ecfdf5; color: #166534; display: block; padding: 1px 4px; border-radius: 4px; }
+    .diff-line-removed { background: #fef2f2; color: #991b1b; display: block; padding: 1px 4px; border-radius: 4px; }
+    .diff-line-same { color: #6b7280; display: block; padding: 1px 4px; }
 </style>
 {% endblock %}
 
@@ -56,10 +63,17 @@
     <div class="w-px h-5 bg-gray-200 mx-1"></div>
     <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="deleteRow">-Row</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="deleteColumn">-Col</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="mergeCells">Merge</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="splitCell">Split</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderRow">Hdr Row</button>
+    <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderColumn">Hdr Col</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
     <div class="w-px h-5 bg-gray-200 mx-1"></div>
     <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
+    <button id="open-footnotes" class="p-1.5 rounded border border-gray-300 text-xs">Manage Notes</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
     <div class="w-px h-5 bg-gray-200 mx-1"></div>
     <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
@@ -156,17 +170,76 @@
     </aside>
 </div>
 
+<div id="slash-menu" class="hidden fixed z-40 w-[340px] max-h-[280px] overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg"></div>
+
+<div id="footnotes-modal" class="hidden fixed inset-0 z-30 bg-black/30 items-center justify-center">
+    <div class="bg-white rounded-lg shadow-xl w-[780px] max-w-[95vw] max-h-[80vh] overflow-hidden">
+        <div class="px-4 py-3 border-b flex justify-between items-center">
+            <h3 class="font-semibold text-navy">Footnotes</h3>
+            <button id="close-footnotes" class="text-gray-500 hover:text-gray-700">✕</button>
+        </div>
+        <div class="px-4 py-3 border-b flex items-center gap-2">
+            <button id="add-footnote-inline" class="bg-navy text-white px-3 py-1 rounded text-sm">Add Footnote</button>
+            <span id="footnote-count" class="text-xs text-gray-500"></span>
+        </div>
+        <div id="footnotes-list" class="p-4 space-y-3 overflow-y-auto" style="max-height:58vh;"></div>
+    </div>
+</div>
+
 <div id="versions-modal" class="hidden fixed inset-0 z-30 bg-black/30 items-center justify-center">
-    <div class="bg-white rounded-lg shadow-xl w-[640px] max-w-[95vw] max-h-[80vh] overflow-hidden">
+    <div class="bg-white rounded-lg shadow-xl w-[1040px] max-w-[97vw] max-h-[86vh] overflow-hidden">
         <div class="px-4 py-3 border-b flex justify-between items-center">
             <h3 class="font-semibold text-navy">Version History</h3>
             <button id="close-versions" class="text-gray-500 hover:text-gray-700">✕</button>
         </div>
-        <div class="px-4 py-3 border-b flex items-center gap-2">
-            <input id="snapshot-label" class="border rounded px-2 py-1 text-sm flex-1" placeholder="Snapshot label (optional)">
-            <button id="save-snapshot" class="bg-navy text-white px-3 py-1 rounded text-sm">Save Snapshot</button>
+        <div class="grid grid-cols-[320px_1fr] h-[74vh]">
+            <div class="border-r border-gray-200 flex flex-col min-h-0">
+                <div class="p-3 border-b space-y-2">
+                    <div class="flex items-center gap-2">
+                        <input id="snapshot-label" class="border rounded px-2 py-1 text-sm flex-1" placeholder="Snapshot label (optional)">
+                        <button id="save-snapshot" class="bg-navy text-white px-3 py-1 rounded text-sm">Save</button>
+                    </div>
+                    <input id="version-filter" class="w-full border rounded px-2 py-1 text-sm" placeholder="Filter versions...">
+                </div>
+                <div id="versions-list" class="p-3 space-y-2 overflow-y-auto min-h-0"></div>
+            </div>
+            <div class="flex flex-col min-h-0">
+                <div id="version-detail-empty" class="m-4 rounded border border-dashed border-gray-300 p-6 text-sm text-gray-500">
+                    Select a snapshot to preview, compare, rename, delete, or restore.
+                </div>
+                <div id="version-detail" class="hidden flex-1 min-h-0 flex flex-col">
+                    <div class="p-4 border-b space-y-3">
+                        <div class="flex items-center justify-between gap-3">
+                            <div>
+                                <div id="version-meta" class="text-xs text-gray-500"></div>
+                                <div id="version-stats" class="text-xs text-gray-500 mt-1"></div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button id="compare-version" class="border rounded px-2 py-1 text-xs">Compare to Current</button>
+                                <button id="restore-version-detail" class="bg-gold text-navy rounded px-2 py-1 text-xs">Restore</button>
+                                <button id="delete-version-detail" class="border border-red-300 text-red-700 rounded px-2 py-1 text-xs">Delete</button>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <input id="version-label-input" class="border rounded px-2 py-1 text-sm flex-1" placeholder="Version label">
+                            <button id="save-version-label" class="bg-navy text-white rounded px-3 py-1 text-xs">Rename</button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-0 flex-1 min-h-0">
+                        <div class="border-r border-gray-200 flex flex-col min-h-0">
+                            <div class="px-3 py-2 text-xs font-semibold text-gray-700 border-b">Snapshot Preview</div>
+                            <pre id="version-preview" class="flex-1 min-h-0 overflow-auto p-3 text-xs whitespace-pre-wrap bg-gray-50"></pre>
+                        </div>
+                        <div class="flex flex-col min-h-0">
+                            <div class="px-3 py-2 text-xs font-semibold text-gray-700 border-b">Compare / Diff</div>
+                            <div id="version-diff" class="flex-1 min-h-0 overflow-auto p-3 text-xs bg-white text-gray-600">
+                                Click "Compare to Current" to generate line-level differences.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div id="versions-list" class="p-4 space-y-2 overflow-y-auto" style="max-height:50vh;"></div>
     </div>
 </div>
 
@@ -200,8 +273,19 @@ const docId = '{{ document.id }}';
 const csrfToken = '{{ csrf_token }}';
 let currentCase = null;
 let currentExemplar = null;
-let footnoteCounter = 1;
-let versionsLoaded = false;
+let isSaving = false;
+let saveTimeout = null;
+let selectedVersionId = null;
+let selectedVersionDetail = null;
+let versions = [];
+let versionFilterText = '';
+let isNormalizingFootnotes = false;
+let slashState = {
+  open: false,
+  items: [],
+  selectedIndex: 0,
+  range: null,
+};
 
 const PageBreak = Node.create({
   name: 'pageBreak',
@@ -213,6 +297,31 @@ const PageBreak = Node.create({
     return {
       setPageBreak: () => ({ commands }) => commands.insertContent({ type: this.name }),
     };
+  },
+});
+
+const FootnoteReference = Node.create({
+  name: 'footnoteReference',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      noteId: { default: null },
+      number: { default: 1 },
+      text: { default: '' },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'sup[data-footnote-id]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    const attrs = { ...HTMLAttributes };
+    const number = attrs.number || '?';
+    attrs['data-footnote-id'] = attrs.noteId || '';
+    attrs.class = `footnote-ref-node ${attrs.class || ''}`.trim();
+    return ['sup', attrs, `[${number}]`];
   },
 });
 
@@ -235,14 +344,17 @@ const editor = new Editor({
     TableHeader,
     TableCell,
     PageBreak,
+    FootnoteReference,
   ],
   content: initialContent,
   editorProps: { attributes: { class: 'tiptap-editor' } },
 });
 
 const saveStatus = document.getElementById('save-status');
-let saveTimeout = null;
-let isSaving = false;
+const versionsModal = document.getElementById('versions-modal');
+const footnotesModal = document.getElementById('footnotes-modal');
+const slashMenu = document.getElementById('slash-menu');
+const editorShell = document.getElementById('editor-shell');
 
 async function saveContent(opts = {}) {
   if (isSaving) return;
@@ -266,28 +378,34 @@ async function saveContent(opts = {}) {
 }
 
 editor.on('update', () => {
+  normalizeFootnotes();
   clearTimeout(saveTimeout);
   saveStatus.textContent = 'Unsaved changes';
   saveTimeout = setTimeout(() => saveContent(), 3000);
   updateToolbar();
+  maybeOpenSlashMenu();
+  if (!footnotesModal.classList.contains('hidden')) {
+    renderFootnotesModal();
+  }
 });
 
-function maybeHandleResearchSlash() {
-  const { from } = editor.state.selection;
-  const start = Math.max(1, from - 20);
-  const textBefore = editor.state.doc.textBetween(start, from, ' ');
-  const match = textBefore.match(/\/research\s?$/);
-  if (!match) return;
-  const deleteFrom = from - match[0].length;
-  editor.chain().focus().deleteRange({ from: deleteFrom, to: from }).run();
-  openSidebar();
-  setTab('search');
-}
-
 editor.view.dom.addEventListener('keydown', (e) => {
-  if (e.key === ' ' || e.key === 'Enter') {
-    setTimeout(maybeHandleResearchSlash, 0);
+  if (handleSlashKeydown(e)) {
+    return;
   }
+  if (e.key === 'Tab' && editor.isActive('table')) {
+    e.preventDefault();
+    if (e.shiftKey) {
+      editor.chain().focus().goToPreviousCell().run();
+    } else {
+      editor.chain().focus().goToNextCell().run();
+    }
+  }
+});
+
+editor.on('selectionUpdate', () => {
+  updateToolbar();
+  maybeOpenSlashMenu();
 });
 
 document.getElementById('doc-title').addEventListener('input', (() => {
@@ -304,19 +422,6 @@ document.getElementById('doc-title').addEventListener('input', (() => {
   };
 })());
 
-function insertFootnote() {
-  const note = window.prompt('Footnote text:');
-  if (!note) return;
-  const idx = footnoteCounter++;
-  editor.chain().focus().insertContent([
-    { type: 'text', text: `[${idx}]`, marks: [{ type: 'superscript' }] },
-  ]).run();
-  const endPos = editor.state.doc.content.size;
-  editor.chain().insertContentAt(endPos, [
-    { type: 'paragraph', content: [{ type: 'text', text: `[${idx}] ${note}` }] },
-  ]).run();
-}
-
 document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('click', () => {
   const a = btn.dataset.action;
   if (a === 'bold') editor.chain().focus().toggleBold().run();
@@ -328,9 +433,15 @@ document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('c
   if (a === 'blockquote') editor.chain().focus().toggleBlockquote().run();
   if (a === 'insertTable') editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
   if (a === 'addRow') editor.chain().focus().addRowAfter().run();
+  if (a === 'deleteRow') editor.chain().focus().deleteRow().run();
   if (a === 'addColumn') editor.chain().focus().addColumnAfter().run();
+  if (a === 'deleteColumn') editor.chain().focus().deleteColumn().run();
+  if (a === 'mergeCells') editor.chain().focus().mergeCells().run();
+  if (a === 'splitCell') editor.chain().focus().splitCell().run();
+  if (a === 'toggleHeaderRow') editor.chain().focus().toggleHeaderRow().run();
+  if (a === 'toggleHeaderColumn') editor.chain().focus().toggleHeaderColumn().run();
   if (a === 'deleteTable') editor.chain().focus().deleteTable().run();
-  if (a === 'footnote') insertFootnote();
+  if (a === 'footnote') insertFootnoteFromPrompt();
   if (a === 'pageBreak') editor.chain().focus().setPageBreak().run();
   if (a === 'undo') editor.chain().focus().undo().run();
   if (a === 'redo') editor.chain().focus().redo().run();
@@ -348,15 +459,13 @@ function updateToolbar() {
       (a === 'bulletList' && editor.isActive('bulletList')) ||
       (a === 'orderedList' && editor.isActive('orderedList')) ||
       (a === 'blockquote' && editor.isActive('blockquote')) ||
-      (a === 'insertTable' && editor.isActive('table')));
+      ((a === 'insertTable' || a === 'addRow' || a === 'deleteRow' || a === 'addColumn' || a === 'deleteColumn' || a === 'deleteTable' || a === 'mergeCells' || a === 'splitCell' || a === 'toggleHeaderRow' || a === 'toggleHeaderColumn') && editor.isActive('table')));
   });
 }
-editor.on('selectionUpdate', updateToolbar);
 
-const shell = document.getElementById('editor-shell');
-function openSidebar() { shell.classList.add('research-open'); }
+function openSidebar() { editorShell.classList.add('research-open'); }
 function closeSidebar() {
-  shell.classList.remove('research-open');
+  editorShell.classList.remove('research-open');
   document.getElementById('case-panel').classList.add('hidden');
   document.getElementById('exemplar-detail-panel').classList.add('hidden');
 }
@@ -664,24 +773,48 @@ function renderVersions(items) {
   const node = document.getElementById('versions-list');
   if (!items.length) {
     node.innerHTML = '<div class="text-sm text-gray-500">No snapshots yet.</div>';
+    selectedVersionId = null;
+    showEmptyVersionDetail();
     return;
   }
-  node.innerHTML = items.map(v => `
-    <div class="border rounded px-3 py-2 flex items-center justify-between">
-      <div>
-        <div class="text-sm font-medium">${v.label || 'Snapshot'}</div>
-        <div class="text-xs text-gray-500">${new Date(v.created_at).toLocaleString()}</div>
+  const filtered = items.filter(v => {
+    if (!versionFilterText) return true;
+    const haystack = `${v.label || ''} ${new Date(v.created_at).toLocaleString()}`.toLowerCase();
+    return haystack.includes(versionFilterText.toLowerCase());
+  });
+  if (!filtered.length) {
+    node.innerHTML = '<div class="text-sm text-gray-500">No versions match that filter.</div>';
+    return;
+  }
+  node.innerHTML = filtered.map(v => `
+    <button class="version-item w-full text-left border rounded px-3 py-2 ${selectedVersionId === String(v.id) ? 'version-item-active' : ''}" data-id="${v.id}">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="text-sm font-medium truncate">${v.label || 'Snapshot'}</div>
+          <div class="text-xs text-gray-500">${new Date(v.created_at).toLocaleString()}</div>
+          <div class="text-xs text-gray-500 mt-1">${v.word_count || 0} words · ${v.char_count || 0} chars</div>
+        </div>
+        <div class="flex flex-col items-end gap-1">
+          ${v.is_auto ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">AUTO</span>' : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">MANUAL</span>'}
+          ${v.is_restore_point ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">RESTORE PT</span>' : ''}
+        </div>
       </div>
-      <button class="restore-version border rounded px-2 py-1 text-xs" data-id="${v.id}">Restore</button>
-    </div>
+      <div class="text-xs text-gray-600 mt-2 line-clamp-2">${escapeHtml(v.preview || '')}</div>
+    </button>
   `).join('');
-  node.querySelectorAll('.restore-version').forEach(btn => btn.addEventListener('click', () => restoreVersion(btn.dataset.id)));
+  node.querySelectorAll('.version-item').forEach(btn => btn.addEventListener('click', () => loadVersionDetail(btn.dataset.id)));
 }
 
 async function loadVersions() {
   const res = await fetch(`/api/versions/${docId}/`);
   const data = await res.json();
-  renderVersions(data.versions || []);
+  versions = data.versions || [];
+  renderVersions(versions);
+  if (!versions.length) return;
+  const candidate = selectedVersionId && versions.find(v => String(v.id) === String(selectedVersionId))
+    ? selectedVersionId
+    : String(versions[0].id);
+  await loadVersionDetail(candidate);
 }
 
 async function createSnapshot() {
@@ -711,20 +844,108 @@ async function restoreVersion(versionId) {
   await loadVersions();
 }
 
-const versionsModal = document.getElementById('versions-modal');
 document.getElementById('open-versions').addEventListener('click', async () => {
   versionsModal.classList.remove('hidden');
   versionsModal.classList.add('flex');
   await loadVersions();
-  versionsLoaded = true;
 });
 document.getElementById('close-versions').addEventListener('click', () => {
   versionsModal.classList.add('hidden');
   versionsModal.classList.remove('flex');
 });
 document.getElementById('save-snapshot').addEventListener('click', createSnapshot);
+document.getElementById('version-filter').addEventListener('input', (e) => {
+  versionFilterText = e.target.value || '';
+  renderVersions(versions);
+});
+
+async function loadVersionDetail(versionId) {
+  selectedVersionId = String(versionId);
+  renderVersions(versions);
+  const res = await fetch(`/api/version/${docId}/${versionId}/`);
+  const data = await res.json();
+  if (!res.ok) {
+    window.alert(data.error || 'Unable to load version');
+    return;
+  }
+  selectedVersionDetail = data;
+  showVersionDetail(data);
+}
+
+function showEmptyVersionDetail() {
+  selectedVersionDetail = null;
+  document.getElementById('version-detail').classList.add('hidden');
+  document.getElementById('version-detail-empty').classList.remove('hidden');
+}
+
+function showVersionDetail(data) {
+  document.getElementById('version-detail-empty').classList.add('hidden');
+  document.getElementById('version-detail').classList.remove('hidden');
+  document.getElementById('version-meta').textContent = `Snapshot #${data.id} · ${new Date(data.created_at).toLocaleString()}`;
+  document.getElementById('version-stats').textContent = `${data.word_count || 0} words · ${data.char_count || 0} chars`;
+  document.getElementById('version-label-input').value = data.label || '';
+  document.getElementById('version-preview').textContent = data.full_text || data.preview || '';
+  document.getElementById('version-diff').innerHTML = 'Click "Compare to Current" to generate line-level differences.';
+}
+
+document.getElementById('save-version-label').addEventListener('click', async () => {
+  if (!selectedVersionId) return;
+  const label = document.getElementById('version-label-input').value.trim();
+  const res = await fetch(`/api/version/${docId}/${selectedVersionId}/label/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+    body: JSON.stringify({ label }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    window.alert(data.message || data.error || 'Unable to rename version');
+    return;
+  }
+  await loadVersions();
+  await loadVersionDetail(selectedVersionId);
+});
+
+document.getElementById('delete-version-detail').addEventListener('click', async () => {
+  if (!selectedVersionId) return;
+  if (!window.confirm('Delete this snapshot? This cannot be undone.')) return;
+  const res = await fetch(`/api/version/${docId}/${selectedVersionId}/delete/`, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    window.alert(data.message || data.error || 'Unable to delete version');
+    return;
+  }
+  await loadVersions();
+});
+
+document.getElementById('restore-version-detail').addEventListener('click', async () => {
+  if (!selectedVersionId) return;
+  await restoreVersion(selectedVersionId);
+});
+
+document.getElementById('compare-version').addEventListener('click', () => {
+  if (!selectedVersionDetail) return;
+  const diff = buildLineDiff(
+    selectedVersionDetail.current_text || '',
+    selectedVersionDetail.full_text || '',
+  );
+  const added = diff.filter(line => line.type === 'added').length;
+  const removed = diff.filter(line => line.type === 'removed').length;
+  const rows = diff.length
+    ? diff.map(line => `<span class="diff-line-${line.type}">${escapeHtml(line.prefix + line.text)}</span>`).join('')
+    : '<span class="diff-line-same">No textual differences detected.</span>';
+  document.getElementById('version-diff').innerHTML = `
+    <div class="mb-2 text-xs text-gray-500">+${added} added lines · -${removed} removed lines</div>
+    ${rows}
+  `;
+});
 
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideSlashMenu();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
     clearTimeout(saveTimeout);
@@ -735,7 +956,438 @@ window.addEventListener('beforeunload', () => {
   if (saveTimeout) saveContent();
 });
 
+function escapeHtml(str) {
+  return (str || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function buildLineDiff(currentText, versionText) {
+  const a = (currentText || '').split('\n');
+  const b = (versionText || '').split('\n');
+  const output = [];
+  let i = 0;
+  let j = 0;
+
+  while ((i < a.length || j < b.length) && output.length < 1200) {
+    const oldLine = i < a.length ? a[i] : null;
+    const newLine = j < b.length ? b[j] : null;
+
+    if (oldLine === newLine) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (oldLine !== null && j + 1 < b.length && oldLine === b[j + 1]) {
+      output.push({ type: 'added', prefix: '+ ', text: b[j] });
+      j += 1;
+      continue;
+    }
+    if (newLine !== null && i + 1 < a.length && a[i + 1] === newLine) {
+      output.push({ type: 'removed', prefix: '- ', text: a[i] });
+      i += 1;
+      continue;
+    }
+    if (oldLine !== null) {
+      output.push({ type: 'removed', prefix: '- ', text: oldLine });
+      i += 1;
+    }
+    if (newLine !== null) {
+      output.push({ type: 'added', prefix: '+ ', text: newLine });
+      j += 1;
+    }
+  }
+
+  if (i < a.length || j < b.length) {
+    output.push({ type: 'same', prefix: '… ', text: 'Diff truncated for readability' });
+  }
+  return output;
+}
+
+function generateNoteId() {
+  return `fn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function collectFootnotes() {
+  const list = [];
+  const byId = new Map();
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'footnoteReference') return;
+    const noteId = node.attrs.noteId || `legacy_${pos}`;
+    const current = byId.get(noteId);
+    if (!current) {
+      const item = {
+        noteId,
+        number: node.attrs.number || list.length + 1,
+        text: node.attrs.text || '',
+        pos,
+      };
+      byId.set(noteId, item);
+      list.push(item);
+    } else if (!current.text && node.attrs.text) {
+      current.text = node.attrs.text;
+    }
+  });
+  list.sort((a, b) => a.number - b.number);
+  return list;
+}
+
+function normalizeFootnotes() {
+  if (isNormalizingFootnotes) return;
+  const order = [];
+  const textById = new Map();
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'footnoteReference') return;
+    const noteId = node.attrs.noteId || `legacy_${pos}`;
+    if (!order.includes(noteId)) {
+      order.push(noteId);
+    }
+    if (!textById.get(noteId) && node.attrs.text) {
+      textById.set(noteId, node.attrs.text);
+    }
+  });
+
+  const numberById = new Map(order.map((noteId, idx) => [noteId, idx + 1]));
+  let changed = false;
+  const tr = editor.state.tr;
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'footnoteReference') return;
+    const existingId = node.attrs.noteId || `legacy_${pos}`;
+    const newAttrs = {
+      ...node.attrs,
+      noteId: existingId,
+      number: numberById.get(existingId) || node.attrs.number || 1,
+      text: textById.get(existingId) || node.attrs.text || '',
+    };
+    const same = Object.keys(newAttrs).every(key => String(node.attrs[key] ?? '') === String(newAttrs[key] ?? ''));
+    if (!same) {
+      tr.setNodeMarkup(pos, undefined, newAttrs);
+      changed = true;
+    }
+  });
+  if (changed) {
+    isNormalizingFootnotes = true;
+    editor.view.dispatch(tr);
+    isNormalizingFootnotes = false;
+  }
+}
+
+function insertFootnoteFromPrompt(defaultText = '') {
+  const text = window.prompt('Footnote text:', defaultText || '');
+  if (text === null) return;
+  const clean = text.trim();
+  if (!clean) return;
+  editor.chain().focus().insertContent({
+    type: 'footnoteReference',
+    attrs: {
+      noteId: generateNoteId(),
+      number: 999,
+      text: clean,
+    },
+  }).run();
+  normalizeFootnotes();
+}
+
+function updateFootnoteText(noteId, newText) {
+  const tr = editor.state.tr;
+  let changed = false;
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'footnoteReference') return;
+    if (node.attrs.noteId !== noteId) return;
+    const attrs = { ...node.attrs, text: newText };
+    tr.setNodeMarkup(pos, undefined, attrs);
+    changed = true;
+  });
+  if (changed) {
+    editor.view.dispatch(tr);
+    normalizeFootnotes();
+  }
+}
+
+function deleteFootnote(noteId) {
+  const ranges = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'footnoteReference') return;
+    if (node.attrs.noteId === noteId) {
+      ranges.push({ from: pos, to: pos + node.nodeSize });
+    }
+  });
+  if (!ranges.length) return;
+  const tr = editor.state.tr;
+  ranges.sort((a, b) => b.from - a.from).forEach(r => tr.delete(r.from, r.to));
+  editor.view.dispatch(tr);
+  normalizeFootnotes();
+}
+
+function jumpToFootnote(noteId) {
+  let targetPos = null;
+  editor.state.doc.descendants((node, pos) => {
+    if (targetPos !== null) return false;
+    if (node.type.name === 'footnoteReference' && node.attrs.noteId === noteId) {
+      targetPos = pos;
+      return false;
+    }
+    return undefined;
+  });
+  if (targetPos !== null) {
+    editor.chain().focus(targetPos).run();
+  }
+}
+
+function renderFootnotesModal() {
+  const notes = collectFootnotes();
+  document.getElementById('footnote-count').textContent = `${notes.length} footnote${notes.length === 1 ? '' : 's'}`;
+  const listNode = document.getElementById('footnotes-list');
+  if (!notes.length) {
+    listNode.innerHTML = '<div class="text-sm text-gray-500">No footnotes yet. Use "Add Footnote" to create one at the cursor.</div>';
+    return;
+  }
+  listNode.innerHTML = notes.map(note => `
+    <div class="border rounded p-3">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold text-navy">[${note.number}] Footnote</div>
+        <div class="flex gap-2">
+          <button class="goto-footnote text-xs border rounded px-2 py-1" data-note-id="${note.noteId}">Go To</button>
+          <button class="delete-footnote text-xs border border-red-300 text-red-700 rounded px-2 py-1" data-note-id="${note.noteId}">Delete</button>
+        </div>
+      </div>
+      <textarea class="footnote-text w-full border rounded p-2 text-sm" rows="3" data-note-id="${note.noteId}" placeholder="Footnote text">${escapeHtml(note.text || '')}</textarea>
+    </div>
+  `).join('');
+
+  listNode.querySelectorAll('.goto-footnote').forEach(btn => btn.addEventListener('click', () => {
+    jumpToFootnote(btn.dataset.noteId);
+    footnotesModal.classList.add('hidden');
+    footnotesModal.classList.remove('flex');
+  }));
+  listNode.querySelectorAll('.delete-footnote').forEach(btn => btn.addEventListener('click', () => {
+    if (!window.confirm('Delete this footnote marker and note text everywhere in the document?')) return;
+    deleteFootnote(btn.dataset.noteId);
+    renderFootnotesModal();
+  }));
+  listNode.querySelectorAll('.footnote-text').forEach(input => {
+    input.addEventListener('blur', () => {
+      updateFootnoteText(input.dataset.noteId, input.value.trim());
+    });
+    input.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        updateFootnoteText(input.dataset.noteId, input.value.trim());
+      }
+    });
+  });
+}
+
+function showFootnotesModal() {
+  renderFootnotesModal();
+  footnotesModal.classList.remove('hidden');
+  footnotesModal.classList.add('flex');
+}
+
+document.getElementById('open-footnotes').addEventListener('click', showFootnotesModal);
+document.getElementById('close-footnotes').addEventListener('click', () => {
+  footnotesModal.classList.add('hidden');
+  footnotesModal.classList.remove('flex');
+});
+document.getElementById('add-footnote-inline').addEventListener('click', () => {
+  insertFootnoteFromPrompt('');
+  renderFootnotesModal();
+});
+
+editor.view.dom.addEventListener('click', (e) => {
+  const target = e.target.closest('sup[data-footnote-id]');
+  if (!target) return;
+  e.preventDefault();
+  showFootnotesModal();
+});
+
+const slashCommands = [
+  {
+    id: 'research',
+    title: 'Open Research Sidebar',
+    description: 'Search, suggest case law, and ask legal questions',
+    keywords: ['research', 'case', 'law', 'suggest'],
+    run: () => {
+      openSidebar();
+      setTab('search');
+    },
+  },
+  {
+    id: 'footnote',
+    title: 'Insert Footnote',
+    description: 'Create a managed, renumbered footnote marker',
+    keywords: ['footnote', 'note', 'citation'],
+    run: () => insertFootnoteFromPrompt(''),
+  },
+  {
+    id: 'page-break',
+    title: 'Insert Page Break',
+    description: 'Start a new page in exports',
+    keywords: ['page', 'break', 'new page'],
+    run: () => editor.chain().focus().setPageBreak().run(),
+  },
+  {
+    id: 'table-3x3',
+    title: 'Insert Table (3x3)',
+    description: 'Add a new table with header row',
+    keywords: ['table', 'grid'],
+    run: () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
+  },
+  {
+    id: 'table-2x2',
+    title: 'Insert Table (2x2)',
+    description: 'Add compact table with header row',
+    keywords: ['table', 'small', 'grid'],
+    run: () => editor.chain().focus().insertTable({ rows: 2, cols: 2, withHeaderRow: true }).run(),
+  },
+  {
+    id: 'snapshot',
+    title: 'Create Snapshot',
+    description: 'Save current document version immediately',
+    keywords: ['version', 'snapshot', 'history'],
+    run: async () => {
+      await createSnapshot();
+      versionsModal.classList.remove('hidden');
+      versionsModal.classList.add('flex');
+    },
+  },
+  {
+    id: 'heading-2',
+    title: 'Insert Heading 2',
+    description: 'Apply H2 heading at cursor',
+    keywords: ['heading', 'h2', 'section'],
+    run: () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+  },
+  {
+    id: 'blockquote',
+    title: 'Insert Block Quote',
+    description: 'Toggle block quote for selected text',
+    keywords: ['quote', 'blockquote'],
+    run: () => editor.chain().focus().toggleBlockquote().run(),
+  },
+];
+
+function getSlashContext() {
+  const { from, to } = editor.state.selection;
+  if (from !== to) return null;
+  const start = Math.max(1, from - 50);
+  const textBefore = editor.state.doc.textBetween(start, from, ' ', '\0');
+  const match = textBefore.match(/\/([a-zA-Z0-9_-]*)$/);
+  if (!match) return null;
+  return {
+    query: (match[1] || '').toLowerCase(),
+    range: { from: from - match[0].length, to: from },
+    atPos: from,
+  };
+}
+
+function hideSlashMenu() {
+  slashState.open = false;
+  slashState.items = [];
+  slashState.selectedIndex = 0;
+  slashState.range = null;
+  slashMenu.classList.add('hidden');
+}
+
+function renderSlashMenu() {
+  if (!slashState.open) {
+    hideSlashMenu();
+    return;
+  }
+  if (!slashState.items.length) {
+    hideSlashMenu();
+    return;
+  }
+  slashMenu.innerHTML = slashState.items.map((item, idx) => `
+    <button class="slash-item w-full text-left p-2 border-b border-gray-100 ${idx === slashState.selectedIndex ? 'slash-item-active' : ''}" data-idx="${idx}">
+      <div class="text-sm font-medium text-navy">${item.title}</div>
+      <div class="text-xs text-gray-500">${item.description}</div>
+    </button>
+  `).join('');
+  slashMenu.querySelectorAll('.slash-item').forEach(btn => btn.addEventListener('mousedown', async (e) => {
+    e.preventDefault();
+    await executeSlashCommand(parseInt(btn.dataset.idx, 10));
+  }));
+}
+
+function maybeOpenSlashMenu() {
+  const ctx = getSlashContext();
+  if (!ctx) {
+    hideSlashMenu();
+    return;
+  }
+  const filtered = slashCommands.filter(cmd => {
+    const haystack = `${cmd.title} ${cmd.description} ${(cmd.keywords || []).join(' ')}`.toLowerCase();
+    return haystack.includes(ctx.query);
+  });
+  if (!filtered.length) {
+    hideSlashMenu();
+    return;
+  }
+  slashState.open = true;
+  slashState.items = filtered;
+  slashState.selectedIndex = Math.min(slashState.selectedIndex, filtered.length - 1);
+  slashState.range = ctx.range;
+
+  const coords = editor.view.coordsAtPos(ctx.atPos);
+  const left = Math.min(coords.left, window.innerWidth - 360);
+  const top = Math.min(coords.bottom + 6, window.innerHeight - 320);
+  slashMenu.style.left = `${Math.max(8, left)}px`;
+  slashMenu.style.top = `${Math.max(8, top)}px`;
+  slashMenu.classList.remove('hidden');
+  renderSlashMenu();
+}
+
+async function executeSlashCommand(index) {
+  const cmd = slashState.items[index];
+  const range = slashState.range;
+  hideSlashMenu();
+  if (!cmd) return;
+  if (range) {
+    editor.chain().focus().deleteRange(range).run();
+  }
+  await Promise.resolve(cmd.run());
+  updateToolbar();
+}
+
+function handleSlashKeydown(e) {
+  if (!slashState.open) return false;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    slashState.selectedIndex = (slashState.selectedIndex + 1) % slashState.items.length;
+    renderSlashMenu();
+    return true;
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    slashState.selectedIndex = (slashState.selectedIndex - 1 + slashState.items.length) % slashState.items.length;
+    renderSlashMenu();
+    return true;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    executeSlashCommand(slashState.selectedIndex);
+    return true;
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    hideSlashMenu();
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener('click', (e) => {
+  if (slashMenu.classList.contains('hidden')) return;
+  if (slashMenu.contains(e.target)) return;
+  if (editor.view.dom.contains(e.target)) return;
+  hideSlashMenu();
+});
+
 setTab('search');
+normalizeFootnotes();
 updateToolbar();
 </script>
 {% endblock %}

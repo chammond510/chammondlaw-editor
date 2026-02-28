@@ -17,6 +17,21 @@ urlpatterns = [
     path("api/save/<uuid:doc_id>/", views.api_save, name="api_save"),
     path("api/title/<uuid:doc_id>/", views.api_update_title, name="api_update_title"),
     path("api/versions/<uuid:doc_id>/", views.api_versions, name="api_versions"),
+    path(
+        "api/version/<uuid:doc_id>/<int:version_id>/",
+        views.api_version_detail,
+        name="api_version_detail",
+    ),
+    path(
+        "api/version/<uuid:doc_id>/<int:version_id>/label/",
+        views.api_update_version_label,
+        name="api_update_version_label",
+    ),
+    path(
+        "api/version/<uuid:doc_id>/<int:version_id>/delete/",
+        views.api_delete_version,
+        name="api_delete_version",
+    ),
     path("api/snapshot/<uuid:doc_id>/", views.api_create_snapshot, name="api_create_snapshot"),
     path(
         "api/restore/<uuid:doc_id>/<int:version_id>/",

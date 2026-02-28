@@ -79,9 +79,20 @@ def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
 
     content = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
     para_counter = [0]  # mutable counter for numbered paragraphs
+    footnotes = []
 
     for node in content:
-        _process_node(doc, node, preset, para_counter)
+        _process_node(doc, node, preset, para_counter, footnotes)
+
+    if footnotes:
+        doc.add_page_break()
+        heading = doc.add_heading(level=2)
+        heading.add_run("Footnotes")
+        for footnote in footnotes:
+            p = doc.add_paragraph()
+            marker = p.add_run(f"[{footnote['number']}] ")
+            marker.font.superscript = True
+            p.add_run(footnote["text"])
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -89,21 +100,24 @@ def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
     return buffer
 
 
-def _process_node(doc, node, preset, para_counter):
+def _process_node(doc, node, preset, para_counter, footnotes):
     """Process a single Tiptap node into docx elements."""
     node_type = node.get("type", "")
 
     if node_type == "heading":
         level = node.get("attrs", {}).get("level", 1)
         level = min(max(level, 1), 3)
-        text_parts = _extract_text_parts(node)
+        inline_parts = _extract_inline_parts(node)
         p = doc.add_heading(level=level)
-        _apply_text_parts(p, text_parts)
+        _apply_text_parts(p, inline_parts, footnotes)
 
     elif node_type == "paragraph":
-        text_parts = _extract_text_parts(node)
+        inline_parts = _extract_inline_parts(node)
         # Skip empty paragraphs (just add spacing)
-        if not text_parts or all(t[0].strip() == "" for t in text_parts):
+        if not inline_parts or all(
+            part.get("type") == "text" and part.get("text", "").strip() == ""
+            for part in inline_parts
+        ):
             doc.add_paragraph("")
             return
 
@@ -113,10 +127,10 @@ def _process_node(doc, node, preset, para_counter):
             run = p.add_run(f"{para_counter[0]}. ")
             run.font.name = preset["font_name"]
             run.font.size = Pt(preset["font_size"])
-            _apply_text_parts(p, text_parts)
+            _apply_text_parts(p, inline_parts, footnotes)
         else:
             p = doc.add_paragraph()
-            _apply_text_parts(p, text_parts)
+            _apply_text_parts(p, inline_parts, footnotes)
 
         # Handle text alignment
         alignment = node.get("attrs", {}).get("textAlign")
@@ -129,20 +143,20 @@ def _process_node(doc, node, preset, para_counter):
 
     elif node_type == "bulletList":
         for item in node.get("content", []):
-            _process_list_item(doc, item, preset, bullet=True)
+            _process_list_item(doc, item, preset, footnotes, bullet=True)
 
     elif node_type == "orderedList":
         for i, item in enumerate(node.get("content", []), 1):
-            _process_list_item(doc, item, preset, bullet=False, number=i)
+            _process_list_item(doc, item, preset, footnotes, bullet=False, number=i)
 
     elif node_type == "blockquote":
         for child in node.get("content", []):
             if child.get("type") == "paragraph":
-                text_parts = _extract_text_parts(child)
+                inline_parts = _extract_inline_parts(child)
                 p = doc.add_paragraph()
                 p.paragraph_format.left_indent = Inches(0.5)
                 p.style = doc.styles["Normal"]
-                _apply_text_parts(p, text_parts)
+                _apply_text_parts(p, inline_parts, footnotes)
 
     elif node_type == "horizontalRule":
         p = doc.add_paragraph()
@@ -157,27 +171,27 @@ def _process_node(doc, node, preset, para_counter):
         p.add_run().add_break(WD_BREAK.PAGE)
 
     elif node_type == "table":
-        _process_table(doc, node, preset)
+        _process_table(doc, node, preset, footnotes)
 
     elif node_type == "hardBreak":
         pass  # Handled within text extraction
 
 
-def _process_list_item(doc, item, preset, bullet=True, number=None):
+def _process_list_item(doc, item, preset, footnotes, bullet=True, number=None):
     """Process a list item node."""
     for child in item.get("content", []):
         if child.get("type") == "paragraph":
-            text_parts = _extract_text_parts(child)
+            inline_parts = _extract_inline_parts(child)
             if bullet:
                 p = doc.add_paragraph(style="List Bullet")
             else:
                 p = doc.add_paragraph(style="List Number")
-            _apply_text_parts(p, text_parts)
+            _apply_text_parts(p, inline_parts, footnotes)
             p.style.font.name = preset["font_name"]
             p.style.font.size = Pt(preset["font_size"])
 
 
-def _process_table(doc, node, preset):
+def _process_table(doc, node, preset, footnotes):
     """Process a table node."""
     rows_data = node.get("content", [])
     if not rows_data:
@@ -201,45 +215,124 @@ def _process_table(doc, node, preset):
                 cell.paragraphs[0].clear()
                 for child in cell_node.get("content", []):
                     if child.get("type") == "paragraph":
-                        text_parts = _extract_text_parts(child)
+                        inline_parts = _extract_inline_parts(child)
                         p = cell.paragraphs[0] if not cell.paragraphs[0].text else cell.add_paragraph()
-                        _apply_text_parts(p, text_parts)
+                        _apply_text_parts(p, inline_parts, footnotes)
 
 
-def _extract_text_parts(node):
+def _extract_inline_parts(node):
     """
-    Extract text and formatting from a node's content.
-    Returns list of (text, marks_dict) tuples.
+    Extract inline content and formatting from a node.
+    Returns list of dicts describing text, breaks, and footnote refs.
     """
     parts = []
     for child in node.get("content", []):
-        if child.get("type") == "text":
+        child_type = child.get("type")
+        if child_type == "text":
             text = child.get("text", "")
             marks = {}
             for mark in child.get("marks", []):
                 marks[mark.get("type", "")] = mark.get("attrs", {})
-            parts.append((text, marks))
-        elif child.get("type") == "hardBreak":
-            parts.append(("\n", {}))
+            parts.append({"type": "text", "text": text, "marks": marks})
+        elif child_type == "hardBreak":
+            parts.append({"type": "hardBreak"})
+        elif child_type == "footnoteReference":
+            attrs = child.get("attrs", {})
+            parts.append(
+                {
+                    "type": "footnoteReference",
+                    "number": attrs.get("number"),
+                    "text": attrs.get("text") or "",
+                }
+            )
     return parts
 
 
-def _apply_text_parts(paragraph, text_parts):
-    """Apply text parts with formatting to a paragraph."""
-    for text, marks in text_parts:
-        run = paragraph.add_run(text)
-        if "bold" in marks:
-            run.bold = True
-        if "italic" in marks:
-            run.italic = True
-        if "underline" in marks:
-            run.underline = True
-        if "strike" in marks:
-            run.font.strike = True
-        if "superscript" in marks:
-            run.font.superscript = True
-        if "subscript" in marks:
-            run.font.subscript = True
+def _apply_text_parts(paragraph, inline_parts, footnotes):
+    """Apply inline parts with formatting to a paragraph."""
+    for part in inline_parts:
+        part_type = part.get("type")
+        if part_type == "text":
+            run = paragraph.add_run(part.get("text", ""))
+            marks = part.get("marks", {})
+            if "bold" in marks:
+                run.bold = True
+            if "italic" in marks:
+                run.italic = True
+            if "underline" in marks:
+                run.underline = True
+            if "strike" in marks:
+                run.font.strike = True
+            if "superscript" in marks:
+                run.font.superscript = True
+            if "subscript" in marks:
+                run.font.subscript = True
+        elif part_type == "hardBreak":
+            paragraph.add_run().add_break(WD_BREAK.LINE)
+        elif part_type == "footnoteReference":
+            number = _coerce_footnote_number(part.get("number"), len(footnotes) + 1)
+            marker = paragraph.add_run(f"[{number}]")
+            marker.font.superscript = True
+            _register_footnote(footnotes, number, part.get("text") or "")
+
+
+def _register_footnote(footnotes, number, text):
+    number = _coerce_footnote_number(number, len(footnotes) + 1)
+    for item in footnotes:
+        if int(item["number"]) == int(number):
+            if text and not item["text"]:
+                item["text"] = text
+            return
+    footnotes.append({"number": number, "text": text})
+
+
+def _coerce_footnote_number(number, fallback):
+    try:
+        return int(number)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _collect_footnotes(tiptap_json):
+    footnotes = []
+    nodes = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
+
+    def walk(node):
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        if node.get("type") == "footnoteReference":
+            attrs = node.get("attrs", {})
+            number = attrs.get("number")
+            text = attrs.get("text") or ""
+            if number is not None:
+                _register_footnote(footnotes, number, text)
+            return
+
+        walk(node.get("content", []))
+
+    walk(nodes)
+    footnotes.sort(key=lambda x: x["number"])
+    return footnotes
+
+
+def _render_footnotes_html(footnotes):
+    if not footnotes:
+        return ""
+    items = "".join(
+        f"<li><span class=\"fn-marker\">[{item['number']}]</span> {escape(item['text'] or '')}</li>"
+        for item in footnotes
+    )
+    return (
+        "<section class=\"footnotes\">"
+        "<h3>Footnotes</h3>"
+        f"<ol>{items}</ol>"
+        "</section>"
+    )
 
 
 def tiptap_to_pdf(tiptap_json, title="Document", export_format="court_brief"):
@@ -263,6 +356,7 @@ def tiptap_to_html(tiptap_json, title="Document", export_format="court_brief"):
     line_height = 2.0 if preset["line_spacing"] == WD_LINE_SPACING.DOUBLE else 1.2
     body_nodes = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
     body_html = "".join(_render_node_html(node) for node in body_nodes)
+    footnotes_html = _render_footnotes_html(_collect_footnotes(tiptap_json))
 
     return f"""<!doctype html>
 <html>
@@ -295,10 +389,17 @@ def tiptap_to_html(tiptap_json, title="Document", export_format="court_brief"):
     table {{ width: 100%; border-collapse: collapse; margin: 8pt 0; }}
     td, th {{ border: 1px solid #9ca3af; padding: 4pt; vertical-align: top; }}
     ol, ul {{ margin: 6pt 0 6pt 20pt; }}
+    .fn-ref {{ font-size: 0.85em; }}
+    .footnotes {{ margin-top: 20pt; border-top: 1px solid #d1d5db; padding-top: 8pt; }}
+    .footnotes h3 {{ font-size: 11pt; margin: 0 0 6pt; }}
+    .footnotes ol {{ margin-left: 18pt; }}
+    .footnotes li {{ margin-bottom: 4pt; }}
+    .fn-marker {{ font-size: 0.9em; }}
   </style>
 </head>
 <body>
 {body_html}
+{footnotes_html}
 </body>
 </html>"""
 
@@ -375,6 +476,10 @@ def _render_inline_html(content):
                     href = escape((mark.get("attrs") or {}).get("href") or "#")
                     text = f'<a href="{href}">{text}</a>'
             pieces.append(text)
+        elif node_type == "footnoteReference":
+            attrs = node.get("attrs", {})
+            number = attrs.get("number") or "?"
+            pieces.append(f"<sup class=\"fn-ref\">[{escape(str(number))}]</sup>")
         elif node_type == "hardBreak":
             pieces.append("<br>")
     return "".join(pieces)
