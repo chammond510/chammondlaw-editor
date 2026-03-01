@@ -1,6 +1,6 @@
 import os
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 
 from django.db import connections
 
@@ -44,6 +44,103 @@ _SEARCH_STOPWORDS = {
     "will",
     "with",
 }
+_LEGAL_KEY_TERMS = {
+    "asylum",
+    "withholding",
+    "cat",
+    "torture",
+    "hardship",
+    "waiver",
+    "nexus",
+    "persecution",
+    "particular",
+    "social",
+    "group",
+    "psg",
+    "credibility",
+    "corroboration",
+    "inadmissibility",
+    "removability",
+    "cancellation",
+    "deportation",
+    "adjustment",
+    "status",
+    "uscis",
+    "bia",
+    "circuit",
+    "precedent",
+    "precedential",
+    "overruled",
+    "good",
+    "law",
+    "lpr",
+    "nonlpr",
+    "i130",
+    "i485",
+    "i589",
+    "i601",
+    "i601a",
+    "i751",
+    "n400",
+    "ina",
+    "usc",
+    "cfr",
+}
+_LEGAL_PHRASES = (
+    "particular social group",
+    "well-founded fear",
+    "unable or unwilling",
+    "government unable or unwilling",
+    "one central reason",
+    "nexus to a protected ground",
+    "clear probability",
+    "more likely than not",
+    "exceptional and extremely unusual hardship",
+    "extreme hardship",
+    "good moral character",
+    "continuous physical presence",
+    "changed circumstances",
+    "firm resettlement",
+    "past persecution",
+    "future persecution",
+    "material support",
+    "crime involving moral turpitude",
+    "particularly serious crime",
+)
+_VALIDITY_SCORE_BONUS = {
+    "good_law": 0.08,
+    "questioned": -0.05,
+    "overruled": -0.35,
+    "unknown": -0.02,
+}
+_CIRCUIT_HINT_PATTERNS = {
+    "1st": (r"\b1st\s*circuit\b", r"\bfirst\s*circuit\b"),
+    "2nd": (r"\b2nd\s*circuit\b", r"\bsecond\s*circuit\b"),
+    "3rd": (r"\b3rd\s*circuit\b", r"\bthird\s*circuit\b"),
+    "4th": (r"\b4th\s*circuit\b", r"\bfourth\s*circuit\b"),
+    "5th": (r"\b5th\s*circuit\b", r"\bfifth\s*circuit\b"),
+    "6th": (r"\b6th\s*circuit\b", r"\bsixth\s*circuit\b"),
+    "7th": (r"\b7th\s*circuit\b", r"\bseventh\s*circuit\b"),
+    "8th": (r"\b8th\s*circuit\b", r"\beighth\s*circuit\b"),
+    "9th": (r"\b9th\s*circuit\b", r"\bninth\s*circuit\b"),
+    "10th": (r"\b10th\s*circuit\b", r"\btenth\s*circuit\b"),
+    "11th": (r"\b11th\s*circuit\b", r"\beleventh\s*circuit\b"),
+    "dc": (r"\bd\.?\s*c\.?\s*circuit\b", r"\bdc\s*circuit\b"),
+}
+_CIRCUIT_LIKE_PATTERNS = {
+    "1st": ("%1st%", "%first%"),
+    "2nd": ("%2nd%", "%second%"),
+    "3rd": ("%3rd%", "%third%"),
+    "4th": ("%4th%", "%fourth%"),
+    "5th": ("%5th%", "%fifth%"),
+    "6th": ("%6th%", "%sixth%"),
+    "7th": ("%7th%", "%seventh%"),
+    "8th": ("%8th%", "%eighth%"),
+    "9th": ("%9th%", "%ninth%"),
+    "10th": ("%10th%", "%tenth%"),
+    "11th": ("%11th%", "%eleventh%"),
+    "dc": ("%d.c.%", "%dc circuit%", "%district of columbia%"),
+}
 
 
 def _openai_client(required=True):
@@ -61,32 +158,199 @@ def _embedding_to_vector(embedding):
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
-def _extract_keyword_terms(text, limit=10):
-    # Build a compact, high-signal query for full-text search.
-    # Using all words from a paragraph can over-constrain tsquery to zero hits.
-    tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())
+def _normalize_ws(value):
+    return " ".join((value or "").split()).strip()
+
+
+def _extract_search_phrases(text, limit=6):
+    lowered = (text or "").lower()
+    phrases = []
     seen = set()
-    terms = []
-    for token in tokens:
-        if token in seen:
+
+    for match in re.finditer(r'"([^"]{4,120})"', text or ""):
+        phrase = _normalize_ws(match.group(1)).lower()
+        if len(phrase.split()) < 2:
             continue
-        seen.add(token)
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        phrases.append(phrase)
+        if len(phrases) >= limit:
+            return phrases
+
+    for regex in (
+        r"\bina\s*§?\s*\d+[a-z0-9()\-]*\b",
+        r"\b8\s*u\.?\s*s\.?\s*c\.?\s*§?\s*\d+[a-z0-9()\-]*\b",
+        r"\b8\s*c\.?\s*f\.?\s*r\.?\s*§?\s*\d+(?:\.\d+)+(?:\([a-z0-9]+\))*\b",
+    ):
+        for match in re.finditer(regex, lowered):
+            phrase = _normalize_ws(match.group(0))
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+            if len(phrases) >= limit:
+                return phrases
+
+    for phrase in _LEGAL_PHRASES:
+        if phrase in lowered and phrase not in seen:
+            seen.add(phrase)
+            phrases.append(phrase)
+            if len(phrases) >= limit:
+                break
+
+    return phrases
+
+
+def _extract_keyword_terms(text, limit=14):
+    tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())
+    if not tokens:
+        return []
+
+    counts = Counter(tokens)
+    first_pos = {}
+    for idx, token in enumerate(tokens):
+        if token not in first_pos:
+            first_pos[token] = idx
+
+    scored = []
+    for token, count in counts.items():
         if token in _SEARCH_STOPWORDS:
             continue
         if len(token) < 3 and not any(ch.isdigit() for ch in token):
             continue
-        terms.append(token)
-        if len(terms) >= limit:
-            break
-    return terms
+
+        score = 0.0
+        if token in _LEGAL_KEY_TERMS:
+            score += 3.0
+        if any(ch.isdigit() for ch in token):
+            score += 2.0
+        if "-" in token or "_" in token:
+            score += 1.0
+        if len(token) >= 8:
+            score += 0.8
+        score += min(2.0, count * 0.35)
+        score -= min(0.6, first_pos[token] * 0.002)
+        scored.append((score, first_pos[token], token))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [token for _, _, token in scored[:limit]]
 
 
-def _build_keyword_query(text):
-    terms = _extract_keyword_terms(text, limit=10)
+def _build_search_queries(text):
+    terms = _extract_keyword_terms(text, limit=14)
     if not terms:
-        fallback_tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())[:6]
+        fallback_tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())[:8]
         terms = [t for t in fallback_tokens if len(t) >= 2]
-    return " OR ".join(terms)
+    keyword_terms = terms[:12]
+    keyword_query = " OR ".join(keyword_terms)
+
+    phrases = _extract_search_phrases(text, limit=6)
+    quoted_phrases = [
+        '"' + phrase.replace('"', "") + '"'
+        for phrase in phrases
+        if len(phrase.split()) >= 2
+    ]
+    phrase_query = " OR ".join(quoted_phrases[:4] + keyword_terms[:6]) if quoted_phrases else keyword_query
+
+    return keyword_query, (phrase_query or keyword_query), keyword_terms, phrases
+
+
+def _infer_circuit_hint(text):
+    lowered = (text or "").lower()
+    for label, patterns in _CIRCUIT_HINT_PATTERNS.items():
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            return label
+    return None
+
+
+def _circuit_filter_clause(circuit_hint):
+    if not circuit_hint:
+        return "", []
+
+    circuit_patterns = list(_CIRCUIT_LIKE_PATTERNS.get(circuit_hint, []))
+    if not circuit_patterns:
+        return "", []
+
+    allowed_patterns = circuit_patterns + ["%bia%", "%attorney general%", "%ag%"]
+    where_parts = ["d.court ILIKE %s" for _ in allowed_patterns]
+    return " AND (" + " OR ".join(where_parts) + ")", allowed_patterns
+
+
+def _infer_category_ids(cursor, keyword_terms, phrases, limit=5):
+    candidates = []
+    for term in keyword_terms[:8]:
+        if len(term) >= 4:
+            candidates.append(term)
+    for phrase in phrases[:4]:
+        normalized = _normalize_ws(phrase).lower()
+        if len(normalized) >= 6:
+            candidates.append(normalized)
+
+    deduped = []
+    seen = set()
+    for value in candidates:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+        if len(deduped) >= 6:
+            break
+
+    if not deduped:
+        return []
+
+    or_parts = []
+    params = []
+    for value in deduped:
+        like_pattern = f"%{value}%"
+        or_parts.extend(["lower(c.name) LIKE %s", "lower(c.slug) LIKE %s"])
+        params.extend([like_pattern, like_pattern])
+
+    sql = f"""
+        SELECT c.id
+        FROM categories c
+        WHERE c.enabled = true
+          AND ({' OR '.join(or_parts)})
+        ORDER BY c.display_order ASC
+        LIMIT %s;
+    """
+    params.append(limit)
+    cursor.execute(sql, params)
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
+def _fetch_category_matched_docs(cursor, doc_ids, category_ids):
+    if not doc_ids or not category_ids:
+        return set()
+
+    doc_placeholders = ",".join(["%s"] * len(doc_ids))
+    category_placeholders = ",".join(["%s"] * len(category_ids))
+    sql = f"""
+        SELECT DISTINCT dc.document_id
+        FROM document_categories dc
+        WHERE dc.document_id IN ({doc_placeholders})
+          AND dc.category_id IN ({category_placeholders});
+    """
+    cursor.execute(sql, [*doc_ids, *category_ids])
+    return {int(row[0]) for row in cursor.fetchall()}
+
+
+def _validity_bonus(status):
+    key = (status or "unknown").lower()
+    return _VALIDITY_SCORE_BONUS.get(key, _VALIDITY_SCORE_BONUS["unknown"])
+
+
+def _court_matches_hint(court_value, circuit_hint):
+    if not circuit_hint:
+        return False
+    lowered = (court_value or "").lower()
+    patterns = _CIRCUIT_LIKE_PATTERNS.get(circuit_hint, ())
+    for pattern in patterns:
+        probe = pattern.replace("%", "").strip()
+        if probe and probe in lowered:
+            return True
+    return False
 
 
 def generate_query_embedding(text):
@@ -99,9 +363,12 @@ def suggest_case_law(text):
     text = (text or "").strip()
     if not text:
         return []
-    keyword_query = _build_keyword_query(text)
+    keyword_query, phrase_query, keyword_terms, phrases = _build_search_queries(text)
     if not keyword_query:
         return []
+
+    circuit_hint = _infer_circuit_hint(text)
+    circuit_filter_sql, circuit_filter_params = _circuit_filter_clause(circuit_hint)
 
     vector = None
     try:
@@ -111,43 +378,57 @@ def suggest_case_law(text):
         # Fallback to keyword-only search when embeddings are unavailable.
         vector = None
 
-    semantic_sql = """
-        SELECT h.document_id, h.legal_issue, h.rule, h.is_primary,
-               d.case_name, d.citation, d.decision_date, d.court, d.precedential_status,
-               d.cited_by_count,
-               cv.status as validity_status,
-               1 - (he.embedding <=> %s::vector) as similarity
-        FROM holding_embeddings he
-        JOIN holdings h ON h.id = he.holding_id
-        JOIN documents d ON d.id = h.document_id
-        LEFT JOIN citation_validity cv ON cv.document_id = d.id
-        WHERE 1 - (he.embedding <=> %s::vector) > 0.55
-        ORDER BY similarity DESC
-        LIMIT 15;
-    """
+    def _run_retrieval(cursor, use_circuit_filter):
+        active_filter_sql = circuit_filter_sql if use_circuit_filter else ""
+        active_filter_params = circuit_filter_params if use_circuit_filter else []
+        semantic_sql = f"""
+            SELECT h.document_id, h.legal_issue, h.rule, h.is_primary,
+                   d.case_name, d.citation, d.decision_date, d.court, d.precedential_status,
+                   d.cited_by_count,
+                   cv.status as validity_status,
+                   1 - (he.embedding <=> %s::vector) as similarity
+            FROM holding_embeddings he
+            JOIN holdings h ON h.id = he.holding_id
+            JOIN documents d ON d.id = h.document_id
+            LEFT JOIN citation_validity cv ON cv.document_id = d.id
+            WHERE 1 - (he.embedding <=> %s::vector) > 0.55
+            {active_filter_sql}
+            ORDER BY similarity DESC
+            LIMIT 20;
+        """
 
-    keyword_sql = """
-        SELECT d.id as document_id, d.case_name, d.citation, d.decision_date, d.court,
-               d.precedential_status, d.cited_by_count,
-               cv.status as validity_status,
-               dt.tsv_rank
-        FROM (
-            SELECT document_id, ts_rank(search_vector, websearch_to_tsquery('english', %s)) as tsv_rank
-            FROM document_texts
-            WHERE search_vector @@ websearch_to_tsquery('english', %s)
-            ORDER BY tsv_rank DESC
-            LIMIT 20
-        ) dt
-        JOIN documents d ON d.id = dt.document_id
-        LEFT JOIN citation_validity cv ON cv.document_id = d.id
-        ORDER BY dt.tsv_rank DESC;
-    """
+        keyword_sql = f"""
+            SELECT d.id as document_id, d.case_name, d.citation, d.decision_date, d.court,
+                   d.precedential_status, d.cited_by_count,
+                   cv.status as validity_status,
+                   dt.tsv_rank, dt.keyword_rank, dt.phrase_rank
+            FROM (
+                SELECT dt.document_id,
+                       ts_rank(dt.search_vector, websearch_to_tsquery('english', %s)) as keyword_rank,
+                       ts_rank(dt.search_vector, websearch_to_tsquery('english', %s)) as phrase_rank,
+                       (
+                           ts_rank(dt.search_vector, websearch_to_tsquery('english', %s)) * 0.55 +
+                           ts_rank(dt.search_vector, websearch_to_tsquery('english', %s)) * 0.45
+                       ) as tsv_rank
+                FROM document_texts dt
+                JOIN documents d ON d.id = dt.document_id
+                WHERE (
+                    dt.search_vector @@ websearch_to_tsquery('english', %s)
+                    OR dt.search_vector @@ websearch_to_tsquery('english', %s)
+                )
+                {active_filter_sql}
+                ORDER BY tsv_rank DESC
+                LIMIT 30
+            ) dt
+            JOIN documents d ON d.id = dt.document_id
+            LEFT JOIN citation_validity cv ON cv.document_id = d.id
+            ORDER BY dt.tsv_rank DESC
+            LIMIT 25;
+        """
 
-    merged = OrderedDict()
-
-    with connections["biaedge"].cursor() as cursor:
+        merged = OrderedDict()
         if vector:
-            cursor.execute(semantic_sql, [vector, vector])
+            cursor.execute(semantic_sql, [vector, vector, *active_filter_params])
             semantic_rows = cursor.fetchall()
 
             for row in semantic_rows:
@@ -167,13 +448,26 @@ def suggest_case_law(text):
                     "similarity": float(row[11] or 0),
                     "semantic_score": float(row[11] or 0),
                     "keyword_score": 0.0,
+                    "phrase_score": 0.0,
+                    "circuit_filtered": use_circuit_filter,
                 }
 
-        cursor.execute(keyword_sql, [keyword_query, keyword_query])
+        keyword_params = [
+            keyword_query,
+            phrase_query,
+            keyword_query,
+            phrase_query,
+            keyword_query,
+            phrase_query,
+            *active_filter_params,
+        ]
+        cursor.execute(keyword_sql, keyword_params)
         keyword_rows = cursor.fetchall()
 
         for row in keyword_rows:
             doc_id = row[0]
+            keyword_score = float(row[8] or 0)
+            phrase_score = float(row[10] or 0)
             if doc_id not in merged:
                 merged[doc_id] = {
                     "document_id": doc_id,
@@ -189,23 +483,68 @@ def suggest_case_law(text):
                     "validity_status": row[7],
                     "similarity": 0.0,
                     "semantic_score": 0.0,
-                    "keyword_score": float(row[8] or 0),
+                    "keyword_score": keyword_score,
+                    "phrase_score": phrase_score,
+                    "circuit_filtered": use_circuit_filter,
                 }
             else:
                 merged[doc_id]["keyword_score"] = max(
-                    merged[doc_id]["keyword_score"], float(row[8] or 0)
+                    merged[doc_id]["keyword_score"], keyword_score
                 )
+                merged[doc_id]["phrase_score"] = max(
+                    merged[doc_id]["phrase_score"], phrase_score
+                )
+
+        return merged
+
+    with connections["biaedge"].cursor() as cursor:
+        inferred_category_ids = _infer_category_ids(cursor, keyword_terms, phrases, limit=5)
+        merged = _run_retrieval(cursor, use_circuit_filter=bool(circuit_hint))
+        if circuit_hint and not merged:
+            # Fallback to unconstrained retrieval if strict circuit filtering yields nothing.
+            merged = _run_retrieval(cursor, use_circuit_filter=False)
+
+        category_matched_docs = _fetch_category_matched_docs(
+            cursor,
+            list(merged.keys()),
+            inferred_category_ids,
+        )
 
     results = list(merged.values())
     for item in results:
         if item["semantic_score"] > 0 and item["keyword_score"] > 0:
-            item["combined_score"] = (item["semantic_score"] * 0.75) + (
-                item["keyword_score"] * 0.25
-            )
+            base_score = (item["semantic_score"] * 0.65) + (item["keyword_score"] * 0.35)
         else:
-            item["combined_score"] = max(item["semantic_score"], item["keyword_score"])
+            base_score = max(item["semantic_score"], item["keyword_score"])
 
-    results.sort(key=lambda x: (x["combined_score"], x["cited_by_count"]), reverse=True)
+        phrase_boost = min(0.18, item.get("phrase_score", 0.0) * 0.20)
+        validity_boost = _validity_bonus(item.get("validity_status"))
+        category_boost = 0.10 if item["document_id"] in category_matched_docs else 0.0
+        circuit_boost = 0.0
+        if circuit_hint:
+            if _court_matches_hint(item.get("court"), circuit_hint):
+                circuit_boost = 0.08
+            elif item.get("court") and item["circuit_filtered"]:
+                circuit_boost = -0.06
+
+        item["combined_score"] = (
+            base_score + phrase_boost + validity_boost + category_boost + circuit_boost
+        )
+        item["category_match"] = item["document_id"] in category_matched_docs
+        item["circuit_hint"] = circuit_hint
+        item["validity_adjustment"] = validity_boost
+
+        if item.get("validity_status") == "overruled":
+            item["combined_score"] -= 0.15
+
+    results.sort(
+        key=lambda x: (
+            x["combined_score"],
+            x.get("phrase_score", 0.0),
+            x.get("cited_by_count", 0),
+        ),
+        reverse=True,
+    )
     return results[:20]
 
 
