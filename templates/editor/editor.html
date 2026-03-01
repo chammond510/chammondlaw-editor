@@ -280,6 +280,7 @@ let selectedVersionDetail = null;
 let versions = [];
 let versionFilterText = '';
 let isNormalizingFootnotes = false;
+let lastSelectedResearchText = '';
 let slashState = {
   open: false,
   items: [],
@@ -404,6 +405,14 @@ editor.view.dom.addEventListener('keydown', (e) => {
 });
 
 editor.on('selectionUpdate', () => {
+  const selected = editor.state.doc.textBetween(
+    editor.state.selection.from,
+    editor.state.selection.to,
+    ' '
+  ).trim();
+  if (selected) {
+    lastSelectedResearchText = selected;
+  }
   updateToolbar();
   maybeOpenSlashMenu();
 });
@@ -508,6 +517,24 @@ function renderResults(items) {
   }));
 }
 
+function renderResearchError(message) {
+  const node = document.getElementById('results');
+  node.classList.remove('hidden');
+  document.getElementById('exemplar-results').classList.add('hidden');
+  node.innerHTML = `<div class="text-xs text-red-700 border border-red-200 bg-red-50 rounded p-2">${message || 'Research request failed.'}</div>`;
+}
+
+function getSuggestSelectionInput() {
+  const selected = editor.state.doc.textBetween(
+    editor.state.selection.from,
+    editor.state.selection.to,
+    ' '
+  ).trim();
+  if (selected) return selected;
+  if (lastSelectedResearchText) return lastSelectedResearchText;
+  return (editor.getText() || '').trim().slice(0, 1200);
+}
+
 function renderAskAnswer(payload) {
   const answer = payload.answer || 'No answer returned.';
   const citations = payload.citations || [];
@@ -540,13 +567,26 @@ function renderAskAnswer(payload) {
 }
 
 async function runSuggest(text) {
-  const res = await fetch('/api/research/suggest/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-    body: JSON.stringify({ text }),
-  });
-  const data = await res.json();
-  renderResults(data.results || []);
+  const queryText = (text || '').trim();
+  if (!queryText) {
+    renderResearchError('Select text in the editor first, or enter a search query.');
+    return;
+  }
+  try {
+    const res = await fetch('/api/research/suggest/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({ text: queryText }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      renderResearchError(data.error || 'Unable to suggest case law right now.');
+      return;
+    }
+    renderResults(data.results || []);
+  } catch {
+    renderResearchError('Network error while suggesting case law.');
+  }
 }
 
 async function runAsk(question) {
@@ -657,9 +697,12 @@ async function loadCategories() {
 }
 
 document.getElementById('run-search').addEventListener('click', () => runSuggest(document.getElementById('research-query').value));
+document.getElementById('run-suggest').addEventListener('mousedown', (e) => {
+  // Preserve current editor selection when clicking the button.
+  e.preventDefault();
+});
 document.getElementById('run-suggest').addEventListener('click', () => {
-  const selected = editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, ' ');
-  runSuggest(selected || editor.getText().slice(0, 1200));
+  runSuggest(getSuggestSelectionInput());
 });
 document.getElementById('run-ask').addEventListener('click', () => {
   const question = document.getElementById('research-query').value.trim();
