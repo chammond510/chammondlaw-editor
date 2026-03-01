@@ -1,4 +1,5 @@
 import os
+import re
 from collections import OrderedDict
 
 from django.db import connections
@@ -6,6 +7,43 @@ from django.db import connections
 
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RESEARCH_ANSWER_MODEL = os.environ.get("OPENAI_RESEARCH_MODEL", "gpt-4.1-mini")
+_SEARCH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "such",
+    "that",
+    "the",
+    "their",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "was",
+    "were",
+    "will",
+    "with",
+}
 
 
 def _openai_client(required=True):
@@ -23,6 +61,34 @@ def _embedding_to_vector(embedding):
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
+def _extract_keyword_terms(text, limit=10):
+    # Build a compact, high-signal query for full-text search.
+    # Using all words from a paragraph can over-constrain tsquery to zero hits.
+    tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())
+    seen = set()
+    terms = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        if token in _SEARCH_STOPWORDS:
+            continue
+        if len(token) < 3 and not any(ch.isdigit() for ch in token):
+            continue
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _build_keyword_query(text):
+    terms = _extract_keyword_terms(text, limit=10)
+    if not terms:
+        fallback_tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", (text or "").lower())[:6]
+        terms = [t for t in fallback_tokens if len(t) >= 2]
+    return " OR ".join(terms)
+
+
 def generate_query_embedding(text):
     client = _openai_client(required=True)
     resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
@@ -32,6 +98,9 @@ def generate_query_embedding(text):
 def suggest_case_law(text):
     text = (text or "").strip()
     if not text:
+        return []
+    keyword_query = _build_keyword_query(text)
+    if not keyword_query:
         return []
 
     vector = None
@@ -63,11 +132,11 @@ def suggest_case_law(text):
                cv.status as validity_status,
                dt.tsv_rank
         FROM (
-            SELECT document_id, ts_rank(search_vector, plainto_tsquery('english', %s)) as tsv_rank
+            SELECT document_id, ts_rank(search_vector, websearch_to_tsquery('english', %s)) as tsv_rank
             FROM document_texts
-            WHERE search_vector @@ plainto_tsquery('english', %s)
+            WHERE search_vector @@ websearch_to_tsquery('english', %s)
             ORDER BY tsv_rank DESC
-            LIMIT 15
+            LIMIT 20
         ) dt
         JOIN documents d ON d.id = dt.document_id
         LEFT JOIN citation_validity cv ON cv.document_id = d.id
@@ -100,7 +169,7 @@ def suggest_case_law(text):
                     "keyword_score": 0.0,
                 }
 
-        cursor.execute(keyword_sql, [text, text])
+        cursor.execute(keyword_sql, [keyword_query, keyword_query])
         keyword_rows = cursor.fetchall()
 
         for row in keyword_rows:
