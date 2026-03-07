@@ -342,14 +342,14 @@ def _knowledge_function_tools() -> list[dict[str, Any]]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "How many exemplar search results to return.",
+                        "description": "How many exemplar search results to return. Use a small integer from 1 to 8.",
                     },
                     "document_type_slug": {
                         "type": "string",
-                        "description": "Optional document type slug to narrow the exemplar search.",
+                        "description": "Document type slug to narrow the exemplar search, or an empty string when no filter is needed.",
                     },
                 },
-                "required": ["query"],
+                "required": ["query", "limit", "document_type_slug"],
             },
         },
         {

@@ -11,6 +11,7 @@ from .agent_service import (
     AgentConfigurationError,
     ChatAgentResult,
     SuggestAgentResult,
+    _knowledge_function_tools,
     _normalize_mcp_server_url,
 )
 from .models import (
@@ -262,6 +263,22 @@ class AgentResearchViewsTests(TestCase):
 
 
 class AgentServiceTests(TestCase):
+    def test_knowledge_function_tools_use_valid_strict_required_lists(self):
+        tools = {
+            tool["name"]: tool
+            for tool in _knowledge_function_tools()
+        }
+
+        search_schema = tools["search_exemplars"]["parameters"]
+        self.assertEqual(
+            search_schema["required"],
+            ["query", "limit", "document_type_slug"],
+        )
+        self.assertEqual(
+            sorted(search_schema["properties"].keys()),
+            sorted(search_schema["required"]),
+        )
+
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
             _normalize_mcp_server_url("biaedge-mcp.onrender.com"),
