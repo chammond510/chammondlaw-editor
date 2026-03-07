@@ -133,6 +133,9 @@
             </div>
             <textarea id="suggest-focus-note" rows="3" class="w-full border rounded px-2 py-2 text-sm" placeholder="Optional focus note, e.g. find the best nexus / PSG / corroboration authority for this paragraph."></textarea>
             <button id="run-agent-suggest" class="w-full px-3 py-2 text-xs bg-navy text-white rounded">Suggest Authorities</button>
+            <div id="agent-suggest-status" class="text-xs text-gray-500">
+                The agent will read the current draft and selected passage before suggesting authorities.
+            </div>
             <div id="agent-suggest-summary" class="hidden text-xs text-gray-600"></div>
             <div id="agent-suggest-results" class="space-y-2"></div>
         </div>
@@ -507,15 +510,128 @@ function updateToolbar() {
   });
 }
 
+const AGENT_DEFAULT_CHAT_STATUS = 'The agent reads the current draft and will include the current selection when available.';
+const AGENT_DEFAULT_SUGGEST_STATUS = 'The agent will read the current draft and selected passage before suggesting authorities.';
+const AGENT_POLL_INTERVAL_MS = 2500;
+const AGENT_POLL_RETRY_INTERVAL_MS = 4000;
+const AGENT_MAX_POLL_FAILURES = 4;
+
 let agentSessionLoaded = false;
 let agentMessages = [];
 let agentBusy = false;
+let agentActiveRun = null;
+let agentActiveRunId = null;
+let agentPollTimer = null;
+let agentPollInFlight = false;
+let agentPollFailures = 0;
+let agentLatestSuggestResult = null;
+
+function setStatusTone(node, tone = 'neutral') {
+  node.classList.remove('text-gray-500', 'text-red-700', 'text-green-700', 'text-navy');
+  if (tone === 'error') node.classList.add('text-red-700');
+  else if (tone === 'success') node.classList.add('text-green-700');
+  else if (tone === 'info') node.classList.add('text-navy');
+  else node.classList.add('text-gray-500');
+}
+
+function setAgentChatStatus(message = AGENT_DEFAULT_CHAT_STATUS, tone = 'neutral') {
+  const node = document.getElementById('agent-chat-status');
+  node.textContent = message || AGENT_DEFAULT_CHAT_STATUS;
+  setStatusTone(node, tone);
+}
+
+function setSuggestStatus(message = AGENT_DEFAULT_SUGGEST_STATUS, tone = 'neutral') {
+  const node = document.getElementById('agent-suggest-status');
+  node.textContent = message || AGENT_DEFAULT_SUGGEST_STATUS;
+  setStatusTone(node, tone);
+}
+
+function getAgentRunId(run) {
+  return run?.id || run?.public_id || run?.uuid || run?.run_id || null;
+}
+
+function getAgentRunMode(run) {
+  return String(run?.mode || run?.run_mode || '').toLowerCase();
+}
+
+function getAgentRunStatus(run) {
+  return String(run?.status || '').toLowerCase();
+}
+
+function isAgentRunActive(run) {
+  const status = getAgentRunStatus(run);
+  return status === 'queued' || status === 'in_progress';
+}
+
+function clearAgentPollTimer() {
+  if (!agentPollTimer) return;
+  window.clearTimeout(agentPollTimer);
+  agentPollTimer = null;
+}
+
+function setActiveAgentRun(run) {
+  agentActiveRun = run || null;
+  agentActiveRunId = run ? getAgentRunId(run) : null;
+}
+
+function syncAgentControls() {
+  agentBusy = isAgentRunActive(agentActiveRun);
+  const activeMode = getAgentRunMode(agentActiveRun);
+  const sendButton = document.getElementById('agent-send');
+  const resetButton = document.getElementById('agent-reset');
+  const suggestButton = document.getElementById('run-agent-suggest');
+
+  sendButton.disabled = agentBusy;
+  suggestButton.disabled = agentBusy;
+  sendButton.classList.toggle('opacity-60', agentBusy);
+  suggestButton.classList.toggle('opacity-60', agentBusy);
+  sendButton.textContent = agentBusy && activeMode === 'chat' ? 'Working...' : 'Send';
+  suggestButton.textContent = agentBusy && activeMode === 'suggest' ? 'Researching...' : 'Suggest Authorities';
+  resetButton.textContent = agentBusy ? 'Cancel / Clear' : 'Clear Thread';
+}
+
+function restoreIdleSuggestStatus() {
+  if (agentLatestSuggestResult) {
+    setSuggestStatus('Showing the latest completed authority suggestions.', 'neutral');
+    return;
+  }
+  setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
+}
+
+function pendingRunStatusText(run) {
+  const stage = (run?.stage || run?.status_text || run?.detail || run?.current_step || '').trim();
+  if (stage === 'queued') {
+    return getAgentRunMode(run) === 'suggest'
+      ? 'Suggestion queued. Starting research...'
+      : 'Agent queued. Starting research...';
+  }
+  if (stage === 'waiting_openai') {
+    return getAgentRunMode(run) === 'suggest'
+      ? 'Researching the selected passage...'
+      : 'Working in the document context...';
+  }
+  if (stage === 'running_tools') return 'Processing tool results...';
+  if (stage === 'continuing') return 'Continuing the response...';
+  if (stage === 'forcing_final') return 'Finalizing the answer...';
+  if (stage === 'repairing_json') return 'Repairing the structured result...';
+  if (stage && !['completed', 'failed', 'cancelled', 'canceled'].includes(stage)) return stage;
+  if (getAgentRunStatus(run) === 'queued') {
+    return getAgentRunMode(run) === 'suggest'
+      ? 'Suggestion queued. Starting research...'
+      : 'Agent queued. Starting research...';
+  }
+  return getAgentRunMode(run) === 'suggest'
+    ? 'Researching the selected passage...'
+    : 'Working in the document context...';
+}
 
 function openSidebar() {
   editorShell.classList.add('research-open');
   refreshResearchSelectionDisplays();
   if (!agentSessionLoaded) {
     loadAgentSession();
+  } else if (agentActiveRunId && isAgentRunActive(agentActiveRun) && !agentPollTimer && !agentPollInFlight) {
+    scheduleAgentPoll(0);
   }
 }
 function closeSidebar() {
@@ -635,31 +751,19 @@ function renderAgentMessages() {
   node.scrollTop = node.scrollHeight;
 }
 
-async function loadAgentSession() {
+function extractReadableError(text) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return 'The server returned an unexpected response.';
+  if (!trimmed.startsWith('<')) return trimmed;
   try {
-    const res = await fetch(`/api/research/agent/session/${docId}/`);
-    const data = await readApiPayload(res);
-    if (!res.ok) {
-      document.getElementById('agent-chat-status').textContent = data.error || 'Unable to load the agent session.';
-      return;
-    }
-    agentMessages = data.messages || [];
-    agentSessionLoaded = true;
-    renderAgentMessages();
+    const parsed = new DOMParser().parseFromString(trimmed, 'text/html');
+    const title = (parsed.querySelector('title')?.textContent || '').replace(/\s+/g, ' ').trim();
+    const body = (parsed.body?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (title && body && body !== title) return `${title}: ${body}`;
+    return title || body || 'The server returned an unexpected response.';
   } catch {
-    document.getElementById('agent-chat-status').textContent = 'Unable to load the agent session.';
+    return trimmed;
   }
-}
-
-function setAgentBusy(isBusy, statusText = '') {
-  agentBusy = isBusy;
-  const sendButton = document.getElementById('agent-send');
-  const resetButton = document.getElementById('agent-reset');
-  sendButton.disabled = isBusy;
-  resetButton.disabled = isBusy;
-  sendButton.classList.toggle('opacity-60', isBusy);
-  sendButton.textContent = isBusy ? 'Working...' : 'Send';
-  document.getElementById('agent-chat-status').textContent = statusText || 'The agent reads the current draft and will include the current selection when available.';
 }
 
 async function readApiPayload(res) {
@@ -668,60 +772,398 @@ async function readApiPayload(res) {
   try {
     return JSON.parse(text);
   } catch {
-    return { error: text.trim() || 'The server returned an unexpected response.' };
+    return { error: extractReadableError(text) };
   }
 }
 
+function extractAgentError(payload, fallback = 'The agent could not answer right now.') {
+  const candidates = [
+    payload?.error,
+    payload?.message,
+    payload?.detail,
+    payload?.run?.error_message,
+    payload?.run?.failure_reason,
+    payload?.run?.error,
+    payload?.run?.last_error,
+  ];
+  const message = candidates.find(value => typeof value === 'string' && value.trim());
+  return message || fallback;
+}
+
+function isSuggestPayload(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    (
+      Array.isArray(value.authorities) ||
+      value.selection_summary ||
+      value.draft_gap ||
+      value.search_notes ||
+      Array.isArray(value.next_questions)
+    )
+  );
+}
+
+function extractSuggestResult(payload) {
+  const candidates = [
+    payload?.suggest_result,
+    payload?.run?.suggest_result,
+    payload?.result_payload?.suggest_result,
+    payload?.run?.result_payload?.suggest_result,
+    payload?.result_payload,
+    payload?.run?.result_payload,
+    payload?.result,
+    payload?.run?.result,
+  ];
+  return candidates.find(isSuggestPayload) || null;
+}
+
+function upsertAgentMessage(message) {
+  if (!message) return;
+  const incomingId = message.id || message.message_id || null;
+  const existingIndex = incomingId
+    ? agentMessages.findIndex(item => String(item.id || item.message_id || '') === String(incomingId))
+    : -1;
+
+  if (existingIndex >= 0) {
+    agentMessages[existingIndex] = message;
+    return;
+  }
+
+  const lastMessage = agentMessages[agentMessages.length - 1];
+  if (
+    !incomingId &&
+    lastMessage &&
+    lastMessage.role === message.role &&
+    (lastMessage.content || '') === (message.content || '')
+  ) {
+    return;
+  }
+  agentMessages.push(message);
+}
+
+function renderSuggestPlaceholder(message, tone = 'neutral') {
+  const results = document.getElementById('agent-suggest-results');
+  const classes = tone === 'error'
+    ? 'text-red-700 border border-red-200 bg-red-50'
+    : 'text-gray-500 border bg-gray-50';
+  results.innerHTML = `<div class="text-xs rounded p-2 ${classes}">${escapeHtml(message)}</div>`;
+}
+
+function renderSuggestPending(message, { clearExisting = true } = {}) {
+  setSuggestStatus(message, 'neutral');
+  if (clearExisting) {
+    document.getElementById('agent-suggest-summary').classList.add('hidden');
+    renderSuggestPlaceholder(message, 'neutral');
+  }
+}
+
+function beginTrackingAgentRun(run, { statusText = '', immediate = false, keepSuggestResult = false } = {}) {
+  if (!run) return;
+  setActiveAgentRun(run);
+  agentPollFailures = 0;
+  syncAgentControls();
+  if (!agentActiveRunId) {
+    if (getAgentRunMode(run) === 'suggest') {
+      renderSuggestError('The agent run started but did not include a run id.');
+    } else {
+      setAgentChatStatus('The agent run started but did not include a run id.', 'error');
+    }
+    setActiveAgentRun(null);
+    syncAgentControls();
+    return;
+  }
+
+  const message = statusText || pendingRunStatusText(run);
+  if (getAgentRunMode(run) === 'suggest') {
+    renderSuggestPending(message, { clearExisting: !keepSuggestResult });
+    setAgentChatStatus('An authority suggestion is in progress for this document.', 'neutral');
+  } else {
+    setAgentChatStatus(message, 'neutral');
+    if (!agentLatestSuggestResult) {
+      setSuggestStatus('A chat run is in progress. Wait for it to finish before starting a new suggestion.', 'neutral');
+    }
+  }
+
+  scheduleAgentPoll(immediate ? 0 : AGENT_POLL_INTERVAL_MS);
+}
+
+function finishAgentRun(run) {
+  clearAgentPollTimer();
+  setActiveAgentRun(null);
+  agentPollFailures = 0;
+  syncAgentControls();
+
+  if (getAgentRunMode(run) === 'suggest') {
+    setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
+  } else {
+    restoreIdleSuggestStatus();
+  }
+}
+
+function completeAgentRun(run, payload) {
+  const mode = getAgentRunMode(run) || (extractSuggestResult(payload) ? 'suggest' : 'chat');
+  if (mode === 'suggest') {
+    const suggestResult = extractSuggestResult(payload);
+    finishAgentRun(run);
+    if (suggestResult) {
+      agentLatestSuggestResult = suggestResult;
+      renderSuggestResponse(suggestResult);
+      setSuggestStatus('Authorities ready.', 'success');
+    } else {
+      renderSuggestError('The suggestion run completed without a structured result.');
+    }
+    return;
+  }
+
+  const assistantMessage = payload?.assistant_message || payload?.run?.assistant_message || null;
+  finishAgentRun(run);
+  if (assistantMessage) {
+    upsertAgentMessage(assistantMessage);
+    renderAgentMessages();
+    setAgentChatStatus('Agent response ready.', 'success');
+    return;
+  }
+  setAgentChatStatus('The agent completed the run but returned no message.', 'error');
+}
+
+function failAgentRun(run, message, tone = 'error') {
+  const mode = getAgentRunMode(run);
+  finishAgentRun(run);
+  if (mode === 'suggest') {
+    renderSuggestError(message);
+    return;
+  }
+  setAgentChatStatus(message, tone);
+}
+
+function scheduleAgentPoll(delay = AGENT_POLL_INTERVAL_MS) {
+  clearAgentPollTimer();
+  if (!agentActiveRunId || !isAgentRunActive(agentActiveRun)) return;
+  agentPollTimer = window.setTimeout(() => pollAgentRun(agentActiveRunId), delay);
+}
+
+async function pollAgentRun(runId = agentActiveRunId) {
+  if (!runId || agentPollInFlight) return;
+  if (agentActiveRunId && runId !== agentActiveRunId) return;
+
+  agentPollInFlight = true;
+  try {
+    const res = await fetch(`/api/research/agent/run/${encodeURIComponent(runId)}/`);
+    const data = await readApiPayload(res);
+    if (agentActiveRunId && runId !== agentActiveRunId) return;
+
+    if (!res.ok) {
+      const message = extractAgentError(data, 'Unable to refresh the current agent run.');
+      agentPollFailures += 1;
+      if (agentPollFailures < AGENT_MAX_POLL_FAILURES && isAgentRunActive(agentActiveRun)) {
+        if (getAgentRunMode(agentActiveRun) === 'suggest') {
+          setSuggestStatus(`${message} Retrying...`, 'neutral');
+        } else {
+          setAgentChatStatus(`${message} Retrying...`, 'neutral');
+        }
+        scheduleAgentPoll(AGENT_POLL_RETRY_INTERVAL_MS);
+        return;
+      }
+      failAgentRun(agentActiveRun, message);
+      return;
+    }
+
+    const run = data.run || agentActiveRun;
+    if (!run) {
+      failAgentRun(agentActiveRun, 'The run status response was missing the run payload.');
+      return;
+    }
+
+    const resolvedRunId = getAgentRunId(run) || runId;
+    if (agentActiveRunId && resolvedRunId !== agentActiveRunId) return;
+
+    setActiveAgentRun(run);
+    agentPollFailures = 0;
+    syncAgentControls();
+
+    if (isAgentRunActive(run)) {
+      const keepSuggestResult = getAgentRunMode(run) === 'suggest' && Boolean(agentLatestSuggestResult);
+      if (getAgentRunMode(run) === 'suggest') {
+        renderSuggestPending(pendingRunStatusText(run), { clearExisting: !keepSuggestResult });
+      } else {
+        setAgentChatStatus(pendingRunStatusText(run), 'neutral');
+      }
+      scheduleAgentPoll(AGENT_POLL_INTERVAL_MS);
+      return;
+    }
+
+    const status = getAgentRunStatus(run);
+    if (status === 'completed') {
+      completeAgentRun(run, data);
+      return;
+    }
+    if (status === 'cancelled' || status === 'canceled') {
+      failAgentRun(run, 'The active agent run was cancelled.', 'neutral');
+      return;
+    }
+    failAgentRun(run, extractAgentError(data, 'The active agent run failed.'));
+  } catch (error) {
+    if (agentActiveRunId && runId !== agentActiveRunId) return;
+    agentPollFailures += 1;
+    const message = error?.message || 'Unable to refresh the current agent run.';
+    if (agentPollFailures < AGENT_MAX_POLL_FAILURES && isAgentRunActive(agentActiveRun)) {
+      if (getAgentRunMode(agentActiveRun) === 'suggest') {
+        setSuggestStatus(`${message} Retrying...`, 'neutral');
+      } else {
+        setAgentChatStatus(`${message} Retrying...`, 'neutral');
+      }
+      scheduleAgentPoll(AGENT_POLL_RETRY_INTERVAL_MS);
+      return;
+    }
+    failAgentRun(agentActiveRun, message);
+  } finally {
+    agentPollInFlight = false;
+  }
+}
+
+async function loadAgentSession() {
+  try {
+    const res = await fetch(`/api/research/agent/session/${docId}/`);
+    const data = await readApiPayload(res);
+    if (!res.ok) {
+      setAgentChatStatus(data.error || 'Unable to load the agent session.', 'error');
+      return;
+    }
+
+    agentMessages = Array.isArray(data.messages) ? data.messages.filter(Boolean) : [];
+    agentSessionLoaded = true;
+    renderAgentMessages();
+
+    const latestSuggestResult = extractSuggestResult(data.latest_suggest_run || null);
+    if (latestSuggestResult) {
+      agentLatestSuggestResult = latestSuggestResult;
+      renderSuggestResponse(latestSuggestResult);
+      restoreIdleSuggestStatus();
+    } else if (!agentLatestSuggestResult) {
+      setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
+    }
+
+    const activeRun = data.active_run || null;
+    if (isAgentRunActive(activeRun)) {
+      beginTrackingAgentRun(activeRun, {
+        immediate: true,
+        keepSuggestResult: Boolean(agentLatestSuggestResult),
+      });
+      return;
+    }
+
+    clearAgentPollTimer();
+    setActiveAgentRun(null);
+    syncAgentControls();
+    setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
+    restoreIdleSuggestStatus();
+  } catch (error) {
+    setAgentChatStatus(error?.message || 'Unable to load the agent session.', 'error');
+  }
+}
+
+function showExistingActiveRunMessage(fallbackMessage) {
+  if (!agentActiveRunId || !isAgentRunActive(agentActiveRun)) return;
+  const message = fallbackMessage || pendingRunStatusText(agentActiveRun);
+  if (getAgentRunMode(agentActiveRun) === 'suggest') {
+    setSuggestStatus(message, 'neutral');
+    setAgentChatStatus('An authority suggestion is already in progress. Waiting for it to finish.', 'neutral');
+  } else {
+    setAgentChatStatus(message, 'neutral');
+    setSuggestStatus('A chat run is already in progress. Wait for it to finish before starting a new suggestion.', 'neutral');
+  }
+  scheduleAgentPoll(0);
+}
+
 async function sendAgentMessage() {
-  if (agentBusy) return;
   const input = document.getElementById('agent-chat-input');
   const message = input.value.trim();
   if (!message) return;
+  if (agentBusy) {
+    showExistingActiveRunMessage('Another agent run is already active. Waiting for it to finish.');
+    return;
+  }
 
-  setAgentBusy(true, 'Working in the document context...');
+  const selectedText = getCurrentResearchSelection();
   try {
     const res = await fetch(`/api/research/agent/chat/${docId}/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
       body: JSON.stringify({
         message,
-        selected_text: getCurrentResearchSelection(),
+        selected_text: selectedText,
       }),
     });
     const data = await readApiPayload(res);
-    if (!res.ok) {
-      setAgentBusy(false, data.error || 'The agent could not answer right now.');
+
+    if (res.status === 409 && data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: data.error || 'Another agent run is already active. Resuming it.',
+        immediate: true,
+        keepSuggestResult: Boolean(agentLatestSuggestResult),
+      });
       return;
     }
 
-    agentMessages.push(data.user_message, data.assistant_message);
+    if (!res.ok) {
+      setAgentChatStatus(extractAgentError(data, 'The agent could not answer right now.'), 'error');
+      return;
+    }
+
+    const userMessage = data.user_message || {
+      role: 'user',
+      content: message,
+      selection_text: selectedText,
+    };
+    upsertAgentMessage(userMessage);
+    agentSessionLoaded = true;
     renderAgentMessages();
     input.value = '';
-    setAgentBusy(false, '');
+
+    if (data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: 'Working in the document context...',
+        immediate: true,
+        keepSuggestResult: Boolean(agentLatestSuggestResult),
+      });
+      return;
+    }
+
+    setAgentChatStatus('The agent started but the run payload was missing.', 'error');
   } catch (error) {
-    setAgentBusy(false, error?.message || 'Unable to reach the agent right now.');
+    setAgentChatStatus(error?.message || 'Unable to reach the agent right now.', 'error');
   }
 }
 
 async function resetAgentSession() {
-  if (agentBusy) return;
-  if (!window.confirm('Clear the chat thread for this document?')) return;
+  const confirmText = agentBusy
+    ? 'Clear the chat thread for this document and cancel the active agent run?'
+    : 'Clear the chat thread for this document?';
+  if (!window.confirm(confirmText)) return;
 
   try {
     const res = await fetch(`/api/research/agent/reset/${docId}/`, {
       method: 'POST',
       headers: { 'X-CSRFToken': csrfToken },
     });
+    const data = await readApiPayload(res);
     if (!res.ok) {
-      document.getElementById('agent-chat-status').textContent = 'Unable to clear the chat thread.';
+      setAgentChatStatus(extractAgentError(data, 'Unable to clear the chat thread.'), 'error');
       return;
     }
+
+    clearAgentPollTimer();
+    setActiveAgentRun(null);
+    agentPollFailures = 0;
+    syncAgentControls();
     agentMessages = [];
     agentSessionLoaded = true;
     renderAgentMessages();
-    document.getElementById('agent-chat-status').textContent = 'Chat thread cleared.';
-  } catch {
-    document.getElementById('agent-chat-status').textContent = 'Unable to clear the chat thread.';
+    setAgentChatStatus('Chat thread cleared.', 'success');
+    restoreIdleSuggestStatus();
+  } catch (error) {
+    setAgentChatStatus(error?.message || 'Unable to clear the chat thread.', 'error');
   }
 }
 
@@ -787,10 +1229,15 @@ function authorityCard(item) {
 
 function renderSuggestError(message) {
   document.getElementById('agent-suggest-summary').classList.add('hidden');
-  document.getElementById('agent-suggest-results').innerHTML = `<div class="text-xs text-red-700 border border-red-200 bg-red-50 rounded p-2">${escapeHtml(message || 'Unable to suggest authorities right now.')}</div>`;
+  renderSuggestPlaceholder(message || 'Unable to suggest authorities right now.', 'error');
+  setSuggestStatus(message || 'Unable to suggest authorities right now.', 'error');
 }
 
 function renderSuggestResponse(payload) {
+  if (!payload) {
+    renderSuggestError('The suggestion run completed without a structured result.');
+    return;
+  }
   const summary = document.getElementById('agent-suggest-summary');
   const nextQuestions = (payload.next_questions || []).filter(Boolean);
   summary.classList.remove('hidden');
@@ -812,14 +1259,18 @@ function renderSuggestResponse(payload) {
 }
 
 async function runAgentSuggest() {
+  if (agentBusy) {
+    showExistingActiveRunMessage('Another agent run is already active. Waiting for it to finish.');
+    return;
+  }
+
   const selectedText = getCurrentResearchSelection();
   if (!selectedText) {
     renderSuggestError('Select text in the editor first so the agent knows what passage to support.');
     return;
   }
 
-  document.getElementById('agent-suggest-summary').classList.add('hidden');
-  document.getElementById('agent-suggest-results').innerHTML = '<div class="text-xs text-gray-500">Researching the selected passage...</div>';
+  renderSuggestPending('Researching the selected passage...');
 
   try {
     const res = await fetch(`/api/research/agent/suggest/${docId}/`, {
@@ -831,11 +1282,38 @@ async function runAgentSuggest() {
       }),
     });
     const data = await readApiPayload(res);
-    if (!res.ok) {
-      renderSuggestError(data.error || 'Unable to suggest authorities right now.');
+    if (res.status === 409 && data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: data.error || 'Another agent run is already active. Resuming it.',
+        immediate: true,
+        keepSuggestResult: Boolean(agentLatestSuggestResult),
+      });
       return;
     }
-    renderSuggestResponse(data);
+
+    if (!res.ok) {
+      renderSuggestError(extractAgentError(data, 'Unable to suggest authorities right now.'));
+      return;
+    }
+
+    if (data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: 'Researching the selected passage...',
+        immediate: true,
+        keepSuggestResult: false,
+      });
+      return;
+    }
+
+    const immediateResult = extractSuggestResult(data);
+    if (immediateResult) {
+      agentLatestSuggestResult = immediateResult;
+      renderSuggestResponse(immediateResult);
+      setSuggestStatus('Authorities ready.', 'success');
+      return;
+    }
+
+    renderSuggestError('The suggestion service did not return a run or a result.');
   } catch (error) {
     renderSuggestError(error?.message || 'Unable to reach the suggestion service right now.');
   }
@@ -896,6 +1374,9 @@ document.getElementById('agent-chat-input').addEventListener('keydown', (e) => {
   }
 });
 refreshResearchSelectionDisplays();
+setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
+setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
+syncAgentControls();
 
 function exemplarCard(item) {
   return `<div class="border rounded p-2 bg-white hover:border-navy">

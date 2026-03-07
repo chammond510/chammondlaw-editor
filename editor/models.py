@@ -1,4 +1,5 @@
 import uuid
+
 from django.db import models
 from django.contrib.auth.models import User
 
@@ -167,3 +168,64 @@ class DocumentResearchMessage(models.Model):
 
     def __str__(self):
         return f"{self.session.document} {self.role} message @ {self.created_at.isoformat()}"
+
+
+class DocumentResearchRun(models.Model):
+    MODE_CHOICES = [
+        ("chat", "Chat"),
+        ("suggest", "Suggest"),
+    ]
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("in_progress", "In Progress"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    session = models.ForeignKey(
+        DocumentResearchSession,
+        on_delete=models.CASCADE,
+        related_name="runs",
+    )
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    stage = models.CharField(max_length=50, blank=True, default="queued")
+    request_payload = models.JSONField(default=dict, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    response_id = models.CharField(max_length=200, blank=True, default="")
+    previous_response_id = models.CharField(max_length=200, blank=True, default="")
+    error_message = models.TextField(blank=True)
+    response_count = models.PositiveIntegerField(default=0)
+    local_function_rounds = models.PositiveIntegerField(default=0)
+    tool_calls = models.JSONField(default=list, blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    usage = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    user_message = models.ForeignKey(
+        DocumentResearchMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="initiated_runs",
+    )
+    assistant_message = models.ForeignKey(
+        DocumentResearchMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="completed_runs",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.session.document} {self.mode} run "
+            f"{self.public_id} ({self.status})"
+        )

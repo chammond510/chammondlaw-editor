@@ -6,6 +6,7 @@ from .models import (
     Exemplar,
     DocumentResearchSession,
     DocumentResearchMessage,
+    DocumentResearchRun,
 )
 
 
@@ -54,3 +55,16 @@ class DocumentResearchMessageAdmin(admin.ModelAdmin):
     list_display = ["session", "role", "created_at"]
     list_filter = ["role", "created_at"]
     search_fields = ["session__document__title", "content", "selection_text", "response_id"]
+
+
+@admin.register(DocumentResearchRun)
+class DocumentResearchRunAdmin(admin.ModelAdmin):
+    list_display = ["public_id", "session", "mode", "status", "stage", "response_count", "updated_at"]
+    list_filter = ["mode", "status", "stage", "updated_at"]
+    search_fields = [
+        "public_id",
+        "session__document__title",
+        "session__user__username",
+        "response_id",
+        "error_message",
+    ]

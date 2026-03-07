@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from django.utils import timezone
+
 from .document_text import clip_document_text, extract_plain_text
 from .exemplar_service import rank_exemplars
-from .models import Exemplar
+from .models import DocumentResearchRun, Exemplar
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,12 @@ AGENT_MODEL = os.environ.get("OPENAI_AGENT_MODEL", "gpt-5.4")
 AGENT_REASONING_EFFORT = os.environ.get("OPENAI_AGENT_REASONING_EFFORT", "high").strip().lower() or "high"
 AGENT_MAX_TOOL_CALLS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_CALLS", "12"))
 AGENT_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_TOKENS", "1800"))
-AGENT_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AGENT_TIMEOUT_SECONDS", "120"))
+AGENT_HTTP_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AGENT_HTTP_TIMEOUT_SECONDS", "25"))
+AGENT_MAX_RUN_SECONDS = int(os.environ.get("OPENAI_AGENT_MAX_RUN_SECONDS", "300"))
+AGENT_MAX_RESPONSES_PER_RUN = int(os.environ.get("OPENAI_AGENT_MAX_RESPONSES_PER_RUN", "8"))
+AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "4"))
+AGENT_MAX_TOTAL_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_TOTAL_TOKENS", "120000"))
+AGENT_MAX_REASONING_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_REASONING_TOKENS", "40000"))
 KNOWLEDGE_VECTOR_STORE_IDS = [
     value.strip()
     for value in os.environ.get("OPENAI_AGENT_KNOWLEDGE_VECTOR_STORE_ID", "").split(",")
@@ -61,6 +68,9 @@ _TOOL_INCLUDE_FIELDS = [
 _CHAT_TRANSCRIPT_LIMIT = 12
 _MAX_FUNCTION_ROUNDS = 8
 _JSON_REPAIR_MAX_OUTPUT_TOKENS = 1200
+_CONTINUE_RESPONSE_MAX_OUTPUT_TOKENS = 900
+_ACTIVE_RUN_STATUSES = {"queued", "in_progress"}
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
@@ -151,6 +161,71 @@ class SuggestAgentResult:
     raw_answer: str
 
 
+def _response_status(response: Any) -> str:
+    return (getattr(response, "status", "") or "").strip().lower()
+
+
+def _usage_to_dict(usage: Any) -> dict[str, int]:
+    if not usage:
+        return {}
+
+    input_details = getattr(usage, "input_tokens_details", None)
+    output_details = getattr(usage, "output_tokens_details", None)
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        "cached_input_tokens": int(getattr(input_details, "cached_tokens", 0) or 0),
+        "reasoning_tokens": int(getattr(output_details, "reasoning_tokens", 0) or 0),
+    }
+
+
+def _sum_usage_by_response(usage_by_response_id: dict[str, dict[str, Any]]) -> dict[str, int]:
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    for payload in usage_by_response_id.values():
+        if not isinstance(payload, dict):
+            continue
+        for key in totals:
+            totals[key] += int(payload.get(key) or 0)
+    return totals
+
+
+def _merge_unique_records(existing: list[dict[str, Any]], new_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in list(existing or []) + list(new_items or []):
+        if not isinstance(item, dict):
+            continue
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _response_error_message(response: Any) -> str:
+    message = _extract_error_text(getattr(response, "error", None))
+    if message:
+        return message
+    incomplete_details = getattr(response, "incomplete_details", None)
+    if incomplete_details:
+        reason = str(getattr(incomplete_details, "reason", "") or "").strip()
+        if reason:
+            return f"OpenAI response incomplete: {reason}."
+    status = _response_status(response)
+    if status:
+        return f"OpenAI response returned status={status}."
+    return "OpenAI response failed."
+
+
 def _safe_json_loads(raw: Any, default=None):
     if isinstance(raw, (dict, list)):
         return raw
@@ -198,7 +273,7 @@ def _new_openai_client():
     except ImportError as exc:
         raise AgentConfigurationError("The openai package is not installed.") from exc
 
-    return OpenAI(api_key=api_key, timeout=AGENT_TIMEOUT_SECONDS)
+    return OpenAI(api_key=api_key, timeout=AGENT_HTTP_TIMEOUT_SECONDS)
 
 
 def _build_biaedge_mcp_tool(*, allowed_tools: list[str]) -> dict[str, Any]:
@@ -603,6 +678,240 @@ class DocumentResearchAgent:
             is_active=True,
         ).exists()
 
+    def start_chat_run(
+        self,
+        *,
+        run: DocumentResearchRun,
+        message: str,
+        selected_text: str = "",
+        previous_response_id: str = "",
+        transcript_messages: list[Any] | None = None,
+    ) -> DocumentResearchRun:
+        normalized_message = (message or "").strip()
+        if not normalized_message:
+            raise AgentExecutionError("A chat message is required.")
+
+        normalized_selection = (selected_text or "").strip()
+        transcript_messages = transcript_messages or []
+        run.mode = "chat"
+        run.request_payload = {
+            "message": normalized_message,
+            "selected_text": normalized_selection,
+        }
+        run.previous_response_id = (previous_response_id or "").strip()
+        run.metadata = self._initial_run_metadata(mode="chat", previous_response_id=run.previous_response_id)
+
+        used_mcp_fallback = False
+        try:
+            tools = self._build_tools(mode="chat", include_mcp=True)
+            input_payload = self._chat_input(
+                message=normalized_message,
+                selected_text=normalized_selection,
+                transcript_messages=[] if run.previous_response_id else transcript_messages,
+            )
+            try:
+                response = self._create_background_response(
+                    instructions=_CHAT_SYSTEM_PROMPT,
+                    input_payload=input_payload,
+                    tools=tools,
+                    previous_response_id=run.previous_response_id or None,
+                    tool_choice="auto",
+                    max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                    mode="chat",
+                )
+            except StaleResponseChainError:
+                rebuilt_input = self._chat_input(
+                    message=normalized_message,
+                    selected_text=normalized_selection,
+                    transcript_messages=transcript_messages,
+                )
+                metadata = dict(run.metadata or {})
+                metadata["stale_previous_response_fallback"] = True
+                metadata["used_previous_response_id"] = False
+                run.metadata = metadata
+                run.previous_response_id = ""
+                response = self._create_background_response(
+                    instructions=_CHAT_SYSTEM_PROMPT,
+                    input_payload=rebuilt_input,
+                    tools=tools,
+                    previous_response_id=None,
+                    tool_choice="auto",
+                    max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                    mode="chat",
+                )
+        except AgentConfigurationError as exc:
+            if "BIAEDGE_MCP_SERVER_URL" not in str(exc):
+                raise
+            used_mcp_fallback = True
+            logger.warning(
+                "Document agent chat continuing without BIA Edge MCP because it is not configured."
+            )
+            response = self._create_background_response(
+                instructions=self._chat_fallback_instructions(),
+                input_payload=self._chat_input(
+                    message=normalized_message,
+                    selected_text=normalized_selection,
+                    transcript_messages=transcript_messages,
+                ),
+                tools=self._build_tools(mode="chat", include_mcp=False),
+                previous_response_id=None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode="chat",
+            )
+            run.previous_response_id = ""
+        except AgentExecutionError as exc:
+            if not self._has_mcp_tools(tools=locals().get("tools", [])) or not _looks_like_mcp_setup_failure(exc):
+                raise
+            used_mcp_fallback = True
+            logger.warning(
+                "Document agent chat retrying without BIA Edge MCP after setup failure: %s",
+                exc,
+            )
+            response = self._create_background_response(
+                instructions=self._chat_fallback_instructions(),
+                input_payload=self._chat_input(
+                    message=normalized_message,
+                    selected_text=normalized_selection,
+                    transcript_messages=transcript_messages,
+                ),
+                tools=self._build_tools(mode="chat", include_mcp=False),
+                previous_response_id=None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode="chat",
+            )
+            run.previous_response_id = ""
+
+        metadata = dict(run.metadata or {})
+        metadata["mcp_fallback"] = used_mcp_fallback
+        run.metadata = metadata
+        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+
+    def start_suggest_run(
+        self,
+        *,
+        run: DocumentResearchRun,
+        selected_text: str,
+        focus_note: str = "",
+    ) -> DocumentResearchRun:
+        normalized_selected = (selected_text or "").strip()
+        if not normalized_selected:
+            raise AgentExecutionError("Selected text is required for case-law suggestions.")
+
+        run.mode = "suggest"
+        run.request_payload = {
+            "selected_text": normalized_selected,
+            "focus_note": (focus_note or "").strip(),
+        }
+        run.previous_response_id = ""
+        run.metadata = self._initial_run_metadata(mode="suggest", previous_response_id="")
+
+        response = self._create_background_response(
+            instructions=_SUGGEST_SYSTEM_PROMPT,
+            input_payload=self._suggest_input(
+                selected_text=normalized_selected,
+                focus_note=(focus_note or "").strip(),
+            ),
+            tools=self._build_tools(mode="suggest", include_mcp=True),
+            previous_response_id=None,
+            tool_choice="required",
+            max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+            mode="suggest",
+        )
+        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+
+    def advance_run(self, *, run: DocumentResearchRun) -> DocumentResearchRun:
+        if run.status in _TERMINAL_RUN_STATUSES:
+            return run
+        if not run.response_id:
+            return self._mark_run_failed(run, "The agent run is missing its OpenAI response ID.")
+
+        budget_error = self._budget_error(run)
+        if budget_error:
+            self.cancel_run(run=run, reason=budget_error, final_status="failed")
+            return run
+
+        try:
+            response = self.client.responses.retrieve(
+                run.response_id,
+                include=list(_TOOL_INCLUDE_FIELDS),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Document research agent response retrieval failed",
+                extra={
+                    "document_id": str(self.document.id),
+                    "user_id": getattr(self.user, "id", None),
+                    "run_id": str(run.public_id),
+                    "response_id": run.response_id,
+                },
+            )
+            return self._mark_run_failed(run, _openai_exception_message(exc))
+
+        self._record_response_artifacts(run, response)
+        budget_error = self._budget_error(run)
+        if budget_error:
+            self.cancel_run(run=run, reason=budget_error, final_status="failed")
+            return run
+
+        status = _response_status(response)
+        if status in {"queued", "in_progress"}:
+            return self._update_run_state(
+                run,
+                status="queued" if status == "queued" else "in_progress",
+                stage="waiting_openai",
+            )
+        if status == "cancelled":
+            return self._mark_run_cancelled(run, _response_error_message(response) or "The agent run was cancelled.")
+        if status == "failed":
+            return self._mark_run_failed(run, _response_error_message(response))
+        if status == "incomplete":
+            return self._continue_incomplete_response(run=run, response=response)
+        if status != "completed":
+            return self._mark_run_failed(
+                run,
+                _response_error_message(response) or f"OpenAI response returned status={status or 'unknown'}.",
+            )
+
+        function_calls = _pending_function_calls(response)
+        if function_calls:
+            return self._continue_after_function_calls(run=run, response=response, function_calls=function_calls)
+
+        answer = _extract_output_text(response)
+        if not answer:
+            return self._queue_force_final_response(run=run, response=response)
+
+        if run.mode == "suggest":
+            return self._finalize_suggest_run(run=run, response=response, answer=answer)
+        return self._finalize_chat_run(run=run, response=response, answer=answer)
+
+    def cancel_run(
+        self,
+        *,
+        run: DocumentResearchRun,
+        reason: str = "",
+        final_status: str = "cancelled",
+    ) -> DocumentResearchRun:
+        response_id = (run.response_id or "").strip()
+        if response_id and run.status in _ACTIVE_RUN_STATUSES:
+            try:
+                self.client.responses.cancel(response_id)
+            except Exception:
+                logger.warning(
+                    "Unable to cancel OpenAI response",
+                    extra={
+                        "document_id": str(self.document.id),
+                        "user_id": getattr(self.user, "id", None),
+                        "run_id": str(run.public_id),
+                        "response_id": response_id,
+                    },
+                )
+
+        if final_status == "failed":
+            return self._mark_run_failed(run, reason or "The agent run was cancelled after exceeding its budget.")
+        return self._mark_run_cancelled(run, reason or "The agent run was cancelled.")
+
     def chat(
         self,
         *,
@@ -747,6 +1056,425 @@ class DocumentResearchAgent:
         if file_search:
             tools.append(file_search)
         return tools
+
+    def _initial_run_metadata(self, *, mode: str, previous_response_id: str) -> dict[str, Any]:
+        return {
+            "model": AGENT_MODEL,
+            "reasoning_effort": AGENT_REASONING_EFFORT,
+            "mcp_fallback": False,
+            "used_previous_response_id": bool(previous_response_id),
+            "forced_final_attempted": False,
+            "json_repair_attempted": False,
+            "continuation_attempts": 0,
+            "usage_by_response_id": {},
+            "prompt_cache_key": self._prompt_cache_key(mode),
+        }
+
+    def _prompt_cache_key(self, mode: str) -> str:
+        return f"document-agent:{mode}:{self.document.id}"
+
+    def _run_instructions(self, run: DocumentResearchRun) -> str:
+        if run.mode == "suggest":
+            return _SUGGEST_SYSTEM_PROMPT
+        if self._run_include_mcp(run):
+            return _CHAT_SYSTEM_PROMPT
+        return self._chat_fallback_instructions()
+
+    def _run_include_mcp(self, run: DocumentResearchRun) -> bool:
+        if run.mode == "suggest":
+            return True
+        metadata = run.metadata or {}
+        return not bool(metadata.get("mcp_fallback"))
+
+    def _response_metadata(self) -> dict[str, str]:
+        return {
+            "document_id": str(self.document.id),
+            "user_id": str(getattr(self.user, "id", "")),
+        }
+
+    def _create_background_response(
+        self,
+        *,
+        instructions: str,
+        input_payload: Any,
+        tools: list[dict[str, Any]],
+        previous_response_id: str | None,
+        tool_choice: str,
+        max_output_tokens: int,
+        mode: str,
+    ):
+        request = {
+            "model": AGENT_MODEL,
+            "instructions": instructions,
+            "input": input_payload,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": True,
+            "max_tool_calls": AGENT_MAX_TOOL_CALLS,
+            "max_output_tokens": max_output_tokens,
+            "reasoning": {"effort": _normalize_reasoning_effort(AGENT_REASONING_EFFORT)},
+            "store": True,
+            "background": True,
+            "include": list(_TOOL_INCLUDE_FIELDS),
+            "truncation": "auto",
+            "metadata": self._response_metadata(),
+            "prompt_cache_key": self._prompt_cache_key(mode),
+            "prompt_cache_retention": "24h",
+            "safety_identifier": f"user-{getattr(self.user, 'id', 'unknown')}",
+        }
+        if previous_response_id:
+            request["previous_response_id"] = previous_response_id
+
+        try:
+            return self.client.responses.create(**request)
+        except Exception as exc:
+            if previous_response_id and _stale_previous_response(exc):
+                raise StaleResponseChainError(str(exc)) from exc
+            logger.exception(
+                "Document research agent background response creation failed",
+                extra={
+                    "document_id": str(self.document.id),
+                    "user_id": getattr(self.user, "id", None),
+                    "model": AGENT_MODEL,
+                    "tool_choice": tool_choice,
+                    "has_previous_response_id": bool(previous_response_id),
+                    "tool_types": [tool.get("type") for tool in tools if isinstance(tool, dict)],
+                    "mode": mode,
+                },
+            )
+            raise AgentExecutionError(_openai_exception_message(exc)) from exc
+
+    def _attach_started_response(
+        self,
+        *,
+        run: DocumentResearchRun,
+        response: Any,
+        stage: str,
+    ) -> DocumentResearchRun:
+        run.response_id = getattr(response, "id", "") or ""
+        run.response_count = int(run.response_count or 0) + 1
+        run.stage = stage
+        status = _response_status(response)
+        if status == "queued":
+            run.status = "queued"
+        elif status in {"failed", "cancelled"}:
+            run.status = "failed" if status == "failed" else "cancelled"
+            run.error_message = _response_error_message(response)
+            run.completed_at = timezone.now()
+        else:
+            run.status = "in_progress"
+        self._record_response_artifacts(run, response)
+        run.save(
+            update_fields=[
+                "status",
+                "stage",
+                "response_id",
+                "response_count",
+                "tool_calls",
+                "citations",
+                "usage",
+                "metadata",
+                "error_message",
+                "completed_at",
+                "updated_at",
+            ]
+        )
+        return run
+
+    def _record_response_artifacts(self, run: DocumentResearchRun, response: Any) -> None:
+        metadata = dict(run.metadata or {})
+        usage_by_response_id = metadata.get("usage_by_response_id") or {}
+        response_id = (getattr(response, "id", "") or "").strip()
+        if response_id and response_id not in usage_by_response_id:
+            usage_dict = _usage_to_dict(getattr(response, "usage", None))
+            if usage_dict:
+                usage_by_response_id[response_id] = usage_dict
+        metadata["usage_by_response_id"] = usage_by_response_id
+        run.metadata = metadata
+        run.usage = _sum_usage_by_response(usage_by_response_id)
+        run.tool_calls = _merge_unique_records(run.tool_calls or [], _extract_hosted_tool_calls(response))
+        run.citations = _merge_unique_records(run.citations or [], _extract_citations(response))
+
+    def _update_run_state(self, run: DocumentResearchRun, *, status: str, stage: str) -> DocumentResearchRun:
+        run.status = status
+        run.stage = stage
+        run.save(update_fields=["status", "stage", "tool_calls", "citations", "usage", "metadata", "updated_at"])
+        return run
+
+    def _mark_run_failed(self, run: DocumentResearchRun, message: str) -> DocumentResearchRun:
+        run.status = "failed"
+        run.stage = "failed"
+        run.error_message = (message or "The agent run failed.").strip()
+        run.completed_at = timezone.now()
+        run.save(
+            update_fields=[
+                "status",
+                "stage",
+                "error_message",
+                "completed_at",
+                "tool_calls",
+                "citations",
+                "usage",
+                "metadata",
+                "updated_at",
+            ]
+        )
+        return run
+
+    def _mark_run_cancelled(self, run: DocumentResearchRun, message: str) -> DocumentResearchRun:
+        run.status = "cancelled"
+        run.stage = "cancelled"
+        run.error_message = (message or "The agent run was cancelled.").strip()
+        run.completed_at = timezone.now()
+        run.save(
+            update_fields=[
+                "status",
+                "stage",
+                "error_message",
+                "completed_at",
+                "tool_calls",
+                "citations",
+                "usage",
+                "metadata",
+                "updated_at",
+            ]
+        )
+        return run
+
+    def _mark_run_completed(self, run: DocumentResearchRun, *, result_payload: dict[str, Any], response: Any) -> DocumentResearchRun:
+        run.status = "completed"
+        run.stage = "completed"
+        run.error_message = ""
+        run.completed_at = timezone.now()
+        run.response_id = (getattr(response, "id", "") or run.response_id or "").strip()
+        run.result_payload = result_payload
+        run.save(
+            update_fields=[
+                "status",
+                "stage",
+                "error_message",
+                "completed_at",
+                "response_id",
+                "result_payload",
+                "tool_calls",
+                "citations",
+                "usage",
+                "metadata",
+                "updated_at",
+            ]
+        )
+        return run
+
+    def _budget_error(self, run: DocumentResearchRun) -> str:
+        elapsed_seconds = max(0, int((timezone.now() - run.created_at).total_seconds()))
+        if elapsed_seconds > AGENT_MAX_RUN_SECONDS:
+            return f"The agent run exceeded the {AGENT_MAX_RUN_SECONDS}-second budget."
+        if int(run.response_count or 0) > AGENT_MAX_RESPONSES_PER_RUN:
+            return f"The agent run exceeded the response budget of {AGENT_MAX_RESPONSES_PER_RUN} OpenAI responses."
+        if int(run.local_function_rounds or 0) > AGENT_MAX_LOCAL_FUNCTION_ROUNDS:
+            return (
+                "The agent run exceeded the local tool continuation budget of "
+                f"{AGENT_MAX_LOCAL_FUNCTION_ROUNDS} rounds."
+            )
+        usage = run.usage or {}
+        if int(usage.get("total_tokens") or 0) > AGENT_MAX_TOTAL_TOKENS:
+            return f"The agent run exceeded the total token budget of {AGENT_MAX_TOTAL_TOKENS}."
+        if int(usage.get("reasoning_tokens") or 0) > AGENT_MAX_REASONING_TOKENS:
+            return f"The agent run exceeded the reasoning token budget of {AGENT_MAX_REASONING_TOKENS}."
+        return ""
+
+    def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        attempts = int(metadata.get("continuation_attempts") or 0)
+        if attempts >= 2:
+            return self._mark_run_failed(
+                run,
+                _response_error_message(response) or "The agent response remained incomplete after continuation attempts.",
+            )
+
+        metadata["continuation_attempts"] = attempts + 1
+        run.metadata = metadata
+        try:
+            follow_up = self._create_background_response(
+                instructions=self._run_instructions(run),
+                input_payload="Continue exactly where you left off and finish the response. Do not restart the answer.",
+                tools=self._build_tools(mode=run.mode, include_mcp=self._run_include_mcp(run)),
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=_CONTINUE_RESPONSE_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=follow_up, stage="continuing")
+
+    def _continue_after_function_calls(
+        self,
+        *,
+        run: DocumentResearchRun,
+        response: Any,
+        function_calls: list[Any],
+    ) -> DocumentResearchRun:
+        outputs = []
+        local_tool_calls: list[dict[str, Any]] = []
+
+        try:
+            for call in function_calls:
+                raw_arguments = getattr(call, "arguments", "") or ""
+                parsed_arguments = _safe_json_loads(raw_arguments, default={}) or {}
+                result = self._call_local_tool(
+                    name=getattr(call, "name", "") or "",
+                    arguments=parsed_arguments,
+                )
+                local_tool_calls.append(
+                    {
+                        "source": "knowledge",
+                        "type": "function_call",
+                        "name": getattr(call, "name", "") or "",
+                        "status": "completed",
+                        "arguments": parsed_arguments,
+                    }
+                )
+                outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": getattr(call, "call_id", "") or "",
+                        "output": json.dumps(result),
+                    }
+                )
+        except Exception as exc:
+            logger.exception(
+                "Document research agent local tool execution failed",
+                extra={
+                    "document_id": str(self.document.id),
+                    "user_id": getattr(self.user, "id", None),
+                    "run_id": str(run.public_id),
+                },
+            )
+            return self._mark_run_failed(run, f"Local tool execution failed: {exc}")
+
+        run.local_function_rounds = int(run.local_function_rounds or 0) + 1
+        run.tool_calls = _merge_unique_records(run.tool_calls or [], local_tool_calls)
+        budget_error = self._budget_error(run)
+        if budget_error:
+            return self._mark_run_failed(run, budget_error)
+
+        try:
+            follow_up = self._create_background_response(
+                instructions=self._run_instructions(run),
+                input_payload=outputs,
+                tools=self._build_tools(mode=run.mode, include_mcp=self._run_include_mcp(run)),
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=follow_up, stage="running_tools")
+
+    def _queue_force_final_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if metadata.get("forced_final_attempted"):
+            return self._mark_run_failed(run, "The agent returned an empty response.")
+
+        metadata["forced_final_attempted"] = True
+        run.metadata = metadata
+        try:
+            follow_up = self._create_background_response(
+                instructions=(
+                    self._run_instructions(run)
+                    + "\n\nYou have already received the relevant tool outputs for this turn. "
+                    + "Provide the final answer now and do not call any more tools."
+                ),
+                input_payload=[
+                    {
+                        "role": "user",
+                        "content": "Provide the final answer to the attorney now. Do not call any more tools.",
+                    }
+                ],
+                tools=[],
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
+
+    def _queue_json_repair(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if metadata.get("json_repair_attempted"):
+            return self._mark_run_failed(run, "The agent did not return valid structured suggestion data.")
+
+        metadata["json_repair_attempted"] = True
+        run.metadata = metadata
+        try:
+            repair_response = self._create_background_response(
+                instructions=(
+                    "You are repairing a structured-output response. "
+                    "Return valid JSON only, matching the previously requested schema. "
+                    "Do not perform more research."
+                ),
+                input_payload=(
+                    "Reformat your previous answer as valid JSON only. "
+                    "Do not include markdown fences or any prose outside the JSON object."
+                ),
+                tools=[],
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=_JSON_REPAIR_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=repair_response, stage="repairing_json")
+
+    def _finalize_chat_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        result_payload = {
+            "answer": answer,
+            "response_id": (getattr(response, "id", "") or "").strip(),
+            "tool_calls": run.tool_calls or [],
+            "citations": run.citations or [],
+            "used_tools": _used_tools(run.tool_calls or []),
+            "metadata": {
+                "model": metadata.get("model", AGENT_MODEL),
+                "reasoning_effort": metadata.get("reasoning_effort", AGENT_REASONING_EFFORT),
+                "mcp_fallback": bool(metadata.get("mcp_fallback")),
+            },
+        }
+        return self._mark_run_completed(run, result_payload=result_payload, response=response)
+
+    def _finalize_suggest_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
+        parsed = _extract_json_object(answer)
+        if parsed is None:
+            return self._queue_json_repair(run=run, response=response)
+
+        if not any(call.get("source") == "biaedge" for call in run.tool_calls or []):
+            return self._mark_run_failed(run, "The suggestion run completed without using BIA Edge tools.")
+
+        result_payload = {
+            "selection_summary": str(parsed.get("selection_summary") or "").strip(),
+            "draft_gap": str(parsed.get("draft_gap") or "").strip(),
+            "authorities": _normalize_authorities(parsed.get("authorities")),
+            "search_notes": str(parsed.get("search_notes") or "").strip(),
+            "next_questions": [
+                str(item).strip()
+                for item in (parsed.get("next_questions") or [])
+                if str(item).strip()
+            ],
+            "response_id": (getattr(response, "id", "") or "").strip(),
+            "tool_calls": run.tool_calls or [],
+            "citations": run.citations or [],
+            "raw_answer": answer,
+        }
+        return self._mark_run_completed(run, result_payload=result_payload, response=response)
 
     def _force_final_response(
         self,

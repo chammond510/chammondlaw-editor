@@ -10,15 +10,14 @@ from docx import Document as DocxDocument
 
 from .agent_service import (
     AgentConfigurationError,
-    ChatAgentResult,
     DocumentResearchAgent,
-    SuggestAgentResult,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
 )
 from .models import (
     Document,
     DocumentResearchMessage,
+    DocumentResearchRun,
     DocumentResearchSession,
     DocumentType,
 )
@@ -123,16 +122,18 @@ class AgentResearchViewsTests(TestCase):
         self.assertTrue(DocumentResearchSession.objects.filter(document=self.document, user=self.user).exists())
 
     @patch("editor.agent_views.DocumentResearchAgent")
-    def test_agent_chat_persists_messages_and_response_id(self, agent_cls):
+    def test_agent_chat_starts_background_run_and_persists_user_message(self, agent_cls):
         agent = agent_cls.return_value
-        agent.chat.return_value = ChatAgentResult(
-            answer="Use Matter of Acosta and cite the nexus standard more directly.",
-            response_id="resp_test_123",
-            tool_calls=[{"source": "biaedge", "name": "search_cases", "type": "mcp_call"}],
-            citations=[{"type": "web", "title": "Example", "url": "https://example.com"}],
-            used_tools=["biaedge"],
-            metadata={"model": "gpt-5.4"},
-        )
+
+        def fake_start_chat_run(*, run, **kwargs):
+            run.status = "in_progress"
+            run.stage = "waiting_openai"
+            run.response_id = "resp_test_123"
+            run.response_count = 1
+            run.save(update_fields=["status", "stage", "response_id", "response_count", "updated_at"])
+            return run
+
+        agent.start_chat_run.side_effect = fake_start_chat_run
 
         response = self.client.post(
             reverse("research_agent_chat", kwargs={"doc_id": self.document.id}),
@@ -143,16 +144,35 @@ class AgentResearchViewsTests(TestCase):
             content_type="application/json",
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         payload = response.json()
-        self.assertEqual(payload["assistant_message"]["content"], agent.chat.return_value.answer)
+        self.assertEqual(payload["user_message"]["content"], "What precedent should I add here?")
+        self.assertEqual(payload["run"]["status"], "in_progress")
+        self.assertEqual(payload["run"]["response_id"], "resp_test_123")
 
         session = DocumentResearchSession.objects.get(document=self.document, user=self.user)
-        self.assertEqual(session.last_response_id, "resp_test_123")
-        self.assertEqual(session.messages.count(), 2)
-        self.assertTrue(
-            DocumentResearchMessage.objects.filter(session=session, role="assistant", response_id="resp_test_123").exists()
+        self.assertEqual(session.last_response_id, "")
+        self.assertEqual(session.messages.count(), 1)
+        self.assertTrue(DocumentResearchRun.objects.filter(session=session, response_id="resp_test_123").exists())
+
+    def test_agent_chat_returns_conflict_when_run_already_active(self):
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
         )
+
+        response = self.client.post(
+            reverse("research_agent_chat", kwargs={"doc_id": self.document.id}),
+            data={"message": "Can you help with this paragraph?"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["run"]["id"], str(run.public_id))
 
     def test_agent_reset_clears_messages(self):
         session = DocumentResearchSession.objects.create(
@@ -174,7 +194,7 @@ class AgentResearchViewsTests(TestCase):
 
     @patch("editor.agent_views.DocumentResearchAgent")
     def test_agent_chat_returns_json_for_unexpected_exception(self, agent_cls):
-        agent_cls.return_value.chat.side_effect = RuntimeError("boom")
+        agent_cls.return_value.start_chat_run.side_effect = RuntimeError("boom")
 
         response = self.client.post(
             reverse("research_agent_chat", kwargs={"doc_id": self.document.id}),
@@ -185,7 +205,7 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(
             response.json()["error"],
-            "The agent failed unexpectedly. The issue has been logged.",
+            "The agent failed unexpectedly while starting.",
         )
 
     @patch("editor.agent_views.DocumentResearchAgent")
@@ -205,47 +225,56 @@ class AgentResearchViewsTests(TestCase):
         )
 
     @patch("editor.agent_views.DocumentResearchAgent")
-    def test_agent_suggest_returns_structured_payload(self, agent_cls):
+    def test_agent_run_status_persists_completed_chat_message(self, agent_cls):
         agent = agent_cls.return_value
-        agent.suggest.return_value = SuggestAgentResult(
-            selection_summary="Nexus support for gang-based persecution.",
-            draft_gap="The paragraph needs controlling nexus authority and one central reason language.",
-            authorities=[
-                {
-                    "kind": "case",
-                    "title": "Matter of C-T-L-",
-                    "citation": "25 I&N Dec. 341 (BIA 2010)",
-                    "document_id": 101,
-                    "reference_id": None,
-                    "precedential_status": "precedential",
-                    "validity_status": "good_law",
-                    "relevance": "Explains the one central reason standard.",
-                    "suggested_use": "Use it to frame the nexus paragraph.",
-                    "pinpoint": "One protected ground must be one central reason for the harm.",
-                }
-            ],
-            search_notes="Searched precedential BIA nexus authorities.",
-            next_questions=["Do you also need PSG-specific authority?"],
-            response_id="resp_suggest_1",
-            tool_calls=[{"source": "biaedge", "name": "search_cases", "type": "mcp_call"}],
-            citations=[],
-            raw_answer="{}",
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        user_message = DocumentResearchMessage.objects.create(
+            session=session,
+            role="user",
+            content="Can you strengthen this section?",
+            selection_text="The client reported gang extortion to police.",
+        )
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            user_message=user_message,
         )
 
-        response = self.client.post(
-            reverse("research_agent_suggest", kwargs={"doc_id": self.document.id}),
-            data={
-                "selected_text": "The threats were because he reported gang extortion.",
-                "focus_note": "Find the best nexus authority.",
-            },
-            content_type="application/json",
+        def fake_advance_run(*, run):
+            run.status = "completed"
+            run.stage = "completed"
+            run.response_id = "resp_chat_done"
+            run.result_payload = {
+                "answer": "Matter of C-T-L- supports the nexus rule here.",
+                "response_id": "resp_chat_done",
+                "tool_calls": [{"source": "biaedge", "type": "mcp_call", "name": "search_cases"}],
+                "citations": [],
+                "used_tools": ["biaedge"],
+                "metadata": {"model": "gpt-5.4"},
+            }
+            run.save(update_fields=["status", "stage", "response_id", "result_payload", "updated_at"])
+            return run
+
+        agent.advance_run.side_effect = fake_advance_run
+
+        response = self.client.get(
+            reverse("research_agent_run", kwargs={"run_id": run.public_id})
         )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["selection_summary"], "Nexus support for gang-based persecution.")
-        self.assertEqual(payload["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
-        self.assertEqual(payload["tool_calls"][0]["source"], "biaedge")
+        self.assertEqual(payload["run"]["status"], "completed")
+        self.assertEqual(payload["assistant_message"]["content"], "Matter of C-T-L- supports the nexus rule here.")
+
+        run.refresh_from_db()
+        session.refresh_from_db()
+        self.assertIsNotNone(run.assistant_message_id)
+        self.assertEqual(session.last_response_id, "resp_chat_done")
+        self.assertTrue(
+            DocumentResearchMessage.objects.filter(session=session, role="assistant", response_id="resp_chat_done").exists()
+        )
 
     @patch("editor.agent_views.DocumentResearchAgent")
     def test_agent_suggest_returns_json_for_constructor_configuration_error(self, agent_cls):
@@ -262,6 +291,87 @@ class AgentResearchViewsTests(TestCase):
             response.json()["error"],
             "OPENAI_API_KEY is not configured.",
         )
+
+    @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_suggest_starts_background_run(self, agent_cls):
+        agent = agent_cls.return_value
+
+        def fake_start_suggest_run(*, run, **kwargs):
+            run.status = "in_progress"
+            run.stage = "waiting_openai"
+            run.response_id = "resp_suggest_1"
+            run.response_count = 1
+            run.save(update_fields=["status", "stage", "response_id", "response_count", "updated_at"])
+            return run
+
+        agent.start_suggest_run.side_effect = fake_start_suggest_run
+
+        response = self.client.post(
+            reverse("research_agent_suggest", kwargs={"doc_id": self.document.id}),
+            data={
+                "selected_text": "The threats were because he reported gang extortion.",
+                "focus_note": "Find the best nexus authority.",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "in_progress")
+        self.assertEqual(payload["run"]["response_id"], "resp_suggest_1")
+
+    @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_run_status_returns_completed_suggest_payload(self, agent_cls):
+        agent = agent_cls.return_value
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="suggest",
+            status="in_progress",
+            stage="waiting_openai",
+        )
+
+        def fake_advance_run(*, run):
+            run.status = "completed"
+            run.stage = "completed"
+            run.response_id = "resp_suggest_done"
+            run.result_payload = {
+                "selection_summary": "Nexus support for gang-based persecution.",
+                "draft_gap": "The paragraph needs controlling nexus authority and one central reason language.",
+                "authorities": [
+                    {
+                        "kind": "case",
+                        "title": "Matter of C-T-L-",
+                        "citation": "25 I&N Dec. 341 (BIA 2010)",
+                        "document_id": 101,
+                        "reference_id": None,
+                        "precedential_status": "precedential",
+                        "validity_status": "good_law",
+                        "relevance": "Explains the one central reason standard.",
+                        "suggested_use": "Use it to frame the nexus paragraph.",
+                        "pinpoint": "One protected ground must be one central reason for the harm.",
+                    }
+                ],
+                "search_notes": "Searched precedential BIA nexus authorities.",
+                "next_questions": ["Do you also need PSG-specific authority?"],
+                "tool_calls": [{"source": "biaedge", "name": "search_cases", "type": "mcp_call"}],
+                "citations": [],
+                "raw_answer": "{}",
+            }
+            run.save(update_fields=["status", "stage", "response_id", "result_payload", "updated_at"])
+            return run
+
+        agent.advance_run.side_effect = fake_advance_run
+
+        response = self.client.get(
+            reverse("research_agent_run", kwargs={"run_id": run.public_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "completed")
+        self.assertEqual(payload["suggest_result"]["selection_summary"], "Nexus support for gang-based persecution.")
+        self.assertEqual(payload["suggest_result"]["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
 
 
 class AgentServiceTests(TestCase):

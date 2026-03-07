@@ -2,14 +2,18 @@ import json
 import logging
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .agent_service import AgentConfigurationError, AgentExecutionError, DocumentResearchAgent
-from .models import Document, DocumentResearchMessage, DocumentResearchSession
+from .models import Document, DocumentResearchMessage, DocumentResearchRun, DocumentResearchSession
 
 logger = logging.getLogger(__name__)
+
+_ACTIVE_RUN_STATUSES = {"queued", "in_progress"}
 
 
 def _serialize_message(message):
@@ -26,6 +30,26 @@ def _serialize_message(message):
     }
 
 
+def _serialize_run(run, *, include_result=False):
+    payload = {
+        "id": str(run.public_id),
+        "mode": run.mode,
+        "status": run.status,
+        "stage": run.stage,
+        "error_message": run.error_message,
+        "response_id": run.response_id,
+        "response_count": run.response_count,
+        "local_function_rounds": run.local_function_rounds,
+        "usage": run.usage or {},
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+    if include_result and run.result_payload:
+        payload["result"] = run.result_payload
+    return payload
+
+
 def _get_session_for_document(*, user, document):
     session, _ = DocumentResearchSession.objects.get_or_create(
         document=document,
@@ -34,12 +58,73 @@ def _get_session_for_document(*, user, document):
     return session
 
 
+def _get_active_run(session):
+    return (
+        session.runs.filter(status__in=_ACTIVE_RUN_STATUSES)
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _mark_run_start_failure(run, message):
+    run.status = "failed"
+    run.stage = "failed"
+    run.error_message = (message or "The agent run failed to start.").strip()
+    run.completed_at = timezone.now()
+    run.save(update_fields=["status", "stage", "error_message", "completed_at", "updated_at"])
+    return run
+
+
+def _cancel_run_without_agent(run, reason):
+    run.status = "cancelled"
+    run.stage = "cancelled"
+    run.error_message = (reason or "The agent run was cancelled.").strip()
+    run.completed_at = timezone.now()
+    run.save(update_fields=["status", "stage", "error_message", "completed_at", "updated_at"])
+    return run
+
+
+def _persist_chat_completion(run):
+    if run.mode != "chat" or run.status != "completed":
+        return None
+    if run.assistant_message_id:
+        return run.assistant_message
+
+    result = run.result_payload or {}
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        return None
+
+    session = run.session
+    assistant_message = DocumentResearchMessage.objects.create(
+        session=session,
+        role="assistant",
+        content=answer,
+        selection_text=run.user_message.selection_text if run.user_message else "",
+        response_id=str(result.get("response_id") or "").strip(),
+        tool_calls=result.get("tool_calls") or [],
+        citations=result.get("citations") or [],
+        metadata=result.get("metadata") or {},
+    )
+    run.assistant_message = assistant_message
+    run.save(update_fields=["assistant_message", "updated_at"])
+    session.last_response_id = str(result.get("response_id") or "").strip()
+    session.save(update_fields=["last_response_id", "updated_at"])
+    return assistant_message
+
+
 @login_required
 @require_GET
 def agent_session(request, doc_id):
     document = get_object_or_404(Document, id=doc_id, created_by=request.user)
     session = _get_session_for_document(user=request.user, document=document)
     messages = [_serialize_message(message) for message in session.messages.order_by("created_at")]
+    active_run = _get_active_run(session)
+    latest_suggest_run = (
+        session.runs.filter(mode="suggest", status="completed")
+        .order_by("-completed_at", "-created_at")
+        .first()
+    )
     return JsonResponse(
         {
             "session": {
@@ -48,6 +133,8 @@ def agent_session(request, doc_id):
                 "updated_at": session.updated_at.isoformat(),
             },
             "messages": messages,
+            "active_run": _serialize_run(active_run) if active_run else None,
+            "latest_suggest_run": _serialize_run(latest_suggest_run, include_result=True) if latest_suggest_run else None,
         }
     )
 
@@ -56,7 +143,6 @@ def agent_session(request, doc_id):
 @require_POST
 def agent_chat(request, doc_id):
     document = get_object_or_404(Document, id=doc_id, created_by=request.user)
-    session = _get_session_for_document(user=request.user, document=document)
 
     try:
         data = json.loads(request.body or "{}")
@@ -68,30 +154,19 @@ def agent_chat(request, doc_id):
     if not message:
         return JsonResponse({"error": "message is required"}, status=400)
 
-    transcript_messages = list(session.messages.order_by("created_at"))
-    try:
-        agent = DocumentResearchAgent(document=document, user=request.user)
-        result = agent.chat(
-            message=message,
-            selected_text=selected_text,
-            previous_response_id=session.last_response_id,
-            transcript_messages=transcript_messages,
-        )
-    except AgentConfigurationError as exc:
-        return JsonResponse({"error": str(exc)}, status=503)
-    except AgentExecutionError as exc:
-        return JsonResponse({"error": str(exc)}, status=502)
-    except Exception:
-        logger.exception(
-            "Unexpected document agent chat failure",
-            extra={"document_id": str(document.id), "user_id": request.user.id},
-        )
-        return JsonResponse(
-            {"error": "The agent failed unexpectedly. The issue has been logged."},
-            status=500,
-        )
-
-    try:
+    with transaction.atomic():
+        session = _get_session_for_document(user=request.user, document=document)
+        session = DocumentResearchSession.objects.select_for_update().get(id=session.id)
+        active_run = _get_active_run(session)
+        if active_run:
+            return JsonResponse(
+                {
+                    "error": "Another research agent task is already running for this document.",
+                    "run": _serialize_run(active_run),
+                },
+                status=409,
+            )
+        transcript_messages = list(session.messages.order_by("created_at"))
         user_message = DocumentResearchMessage.objects.create(
             session=session,
             role="user",
@@ -99,34 +174,46 @@ def agent_chat(request, doc_id):
             selection_text=selected_text,
             metadata={"used_selection": bool(selected_text)},
         )
-        assistant_message = DocumentResearchMessage.objects.create(
+        run = DocumentResearchRun.objects.create(
             session=session,
-            role="assistant",
-            content=result.answer,
-            selection_text=selected_text,
-            response_id=result.response_id,
-            tool_calls=result.tool_calls,
-            citations=result.citations,
-            metadata=result.metadata,
+            mode="chat",
+            status="queued",
+            stage="queued",
+            user_message=user_message,
         )
-        session.last_response_id = result.response_id
-        session.save(update_fields=["last_response_id", "updated_at"])
+
+    try:
+        agent = DocumentResearchAgent(document=document, user=request.user)
+        run = agent.start_chat_run(
+            run=run,
+            message=message,
+            selected_text=selected_text,
+            previous_response_id=session.last_response_id,
+            transcript_messages=transcript_messages,
+        )
+    except AgentConfigurationError as exc:
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=503)
+    except AgentExecutionError as exc:
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=502)
     except Exception:
         logger.exception(
-            "Unexpected document agent chat persistence failure",
-            extra={"document_id": str(document.id), "user_id": request.user.id},
+            "Unexpected document agent chat start failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id, "run_id": str(run.public_id)},
         )
+        _mark_run_start_failure(run, "The agent failed unexpectedly while starting.")
         return JsonResponse(
-            {"error": "The agent answered, but saving the chat thread failed."},
+            {"error": "The agent failed unexpectedly while starting.", "run": _serialize_run(run)},
             status=500,
         )
 
     return JsonResponse(
         {
+            "run": _serialize_run(run),
             "user_message": _serialize_message(user_message),
-            "assistant_message": _serialize_message(assistant_message),
-            "used_tools": result.used_tools,
-        }
+        },
+        status=202,
     )
 
 
@@ -135,6 +222,21 @@ def agent_chat(request, doc_id):
 def agent_reset(request, doc_id):
     document = get_object_or_404(Document, id=doc_id, created_by=request.user)
     session = _get_session_for_document(user=request.user, document=document)
+    active_runs = list(session.runs.filter(status__in=_ACTIVE_RUN_STATUSES))
+
+    agent = None
+    if active_runs:
+        try:
+            agent = DocumentResearchAgent(document=document, user=request.user)
+        except AgentConfigurationError:
+            agent = None
+
+    for run in active_runs:
+        if agent:
+            agent.cancel_run(run=run, reason="The attorney cleared the chat thread.")
+        else:
+            _cancel_run_without_agent(run, "The attorney cleared the chat thread.")
+
     session.messages.all().delete()
     session.last_response_id = ""
     session.save(update_fields=["last_response_id", "updated_at"])
@@ -156,32 +258,101 @@ def agent_suggest(request, doc_id):
     if not selected_text:
         return JsonResponse({"error": "selected_text is required"}, status=400)
 
+    with transaction.atomic():
+        session = _get_session_for_document(user=request.user, document=document)
+        session = DocumentResearchSession.objects.select_for_update().get(id=session.id)
+        active_run = _get_active_run(session)
+        if active_run:
+            return JsonResponse(
+                {
+                    "error": "Another research agent task is already running for this document.",
+                    "run": _serialize_run(active_run),
+                },
+                status=409,
+            )
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="suggest",
+            status="queued",
+            stage="queued",
+        )
+
     try:
         agent = DocumentResearchAgent(document=document, user=request.user)
-        result = agent.suggest(selected_text=selected_text, focus_note=focus_note)
+        run = agent.start_suggest_run(
+            run=run,
+            selected_text=selected_text,
+            focus_note=focus_note,
+        )
     except AgentConfigurationError as exc:
-        return JsonResponse({"error": str(exc)}, status=503)
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=503)
     except AgentExecutionError as exc:
-        return JsonResponse({"error": str(exc)}, status=502)
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=502)
     except Exception:
         logger.exception(
-            "Unexpected document agent suggest failure",
-            extra={"document_id": str(document.id), "user_id": request.user.id},
+            "Unexpected document agent suggest start failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id, "run_id": str(run.public_id)},
         )
+        _mark_run_start_failure(run, "The agent failed unexpectedly while starting.")
         return JsonResponse(
-            {"error": "The agent failed unexpectedly. The issue has been logged."},
+            {"error": "The agent failed unexpectedly while starting.", "run": _serialize_run(run)},
             status=500,
         )
 
+    return JsonResponse({"run": _serialize_run(run)}, status=202)
+
+
+@login_required
+@require_GET
+def agent_run_status(request, run_id):
+    run = get_object_or_404(
+        DocumentResearchRun.objects.select_related(
+            "session",
+            "session__document",
+            "assistant_message",
+            "user_message",
+        ),
+        public_id=run_id,
+        session__user=request.user,
+        session__document__created_by=request.user,
+    )
+
+    if run.status in _ACTIVE_RUN_STATUSES:
+        try:
+            agent = DocumentResearchAgent(document=run.session.document, user=request.user)
+            run = agent.advance_run(run=run)
+        except AgentConfigurationError as exc:
+            run = _mark_run_start_failure(run, str(exc))
+        except Exception:
+            logger.exception(
+                "Unexpected document agent polling failure",
+                extra={
+                    "document_id": str(run.session.document.id),
+                    "user_id": request.user.id,
+                    "run_id": str(run.public_id),
+                },
+            )
+            run = _mark_run_start_failure(run, "The agent failed unexpectedly while polling.")
+
+    assistant_message = None
+    if run.mode == "chat" and run.status == "completed":
+        with transaction.atomic():
+            locked_run = DocumentResearchRun.objects.select_for_update().select_related(
+                "session",
+                "assistant_message",
+                "user_message",
+            ).get(id=run.id)
+            assistant_message = _persist_chat_completion(locked_run)
+            run = locked_run
+
     return JsonResponse(
         {
-            "selection_summary": result.selection_summary,
-            "draft_gap": result.draft_gap,
-            "authorities": result.authorities,
-            "search_notes": result.search_notes,
-            "next_questions": result.next_questions,
-            "tool_calls": result.tool_calls,
-            "citations": result.citations,
-            "response_id": result.response_id,
+            "run": _serialize_run(run, include_result=run.mode == "suggest"),
+            "assistant_message": _serialize_message(assistant_message) if assistant_message else (
+                _serialize_message(run.assistant_message) if run.assistant_message_id else None
+            ),
+            "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
         }
     )
