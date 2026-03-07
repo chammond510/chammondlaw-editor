@@ -638,7 +638,7 @@ function renderAgentMessages() {
 async function loadAgentSession() {
   try {
     const res = await fetch(`/api/research/agent/session/${docId}/`);
-    const data = await res.json();
+    const data = await readApiPayload(res);
     if (!res.ok) {
       document.getElementById('agent-chat-status').textContent = data.error || 'Unable to load the agent session.';
       return;
@@ -662,6 +662,16 @@ function setAgentBusy(isBusy, statusText = '') {
   document.getElementById('agent-chat-status').textContent = statusText || 'The agent reads the current draft and will include the current selection when available.';
 }
 
+async function readApiPayload(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text.trim() || 'The server returned an unexpected response.' };
+  }
+}
+
 async function sendAgentMessage() {
   if (agentBusy) return;
   const input = document.getElementById('agent-chat-input');
@@ -678,7 +688,7 @@ async function sendAgentMessage() {
         selected_text: getCurrentResearchSelection(),
       }),
     });
-    const data = await res.json();
+    const data = await readApiPayload(res);
     if (!res.ok) {
       setAgentBusy(false, data.error || 'The agent could not answer right now.');
       return;
@@ -688,8 +698,8 @@ async function sendAgentMessage() {
     renderAgentMessages();
     input.value = '';
     setAgentBusy(false, '');
-  } catch {
-    setAgentBusy(false, 'Network error while talking to the agent.');
+  } catch (error) {
+    setAgentBusy(false, error?.message || 'Unable to reach the agent right now.');
   }
 }
 
@@ -820,14 +830,14 @@ async function runAgentSuggest() {
         focus_note: document.getElementById('suggest-focus-note').value.trim(),
       }),
     });
-    const data = await res.json();
+    const data = await readApiPayload(res);
     if (!res.ok) {
       renderSuggestError(data.error || 'Unable to suggest authorities right now.');
       return;
     }
     renderSuggestResponse(data);
-  } catch {
-    renderSuggestError('Network error while suggesting authorities.');
+  } catch (error) {
+    renderSuggestError(error?.message || 'Unable to reach the suggestion service right now.');
   }
 }
 

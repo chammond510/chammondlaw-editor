@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.urls import reverse
 from docx import Document as DocxDocument
 
-from .agent_service import ChatAgentResult, SuggestAgentResult
+from .agent_service import ChatAgentResult, SuggestAgentResult, _normalize_mcp_server_url
 from .models import (
     Document,
     DocumentResearchMessage,
@@ -165,6 +165,22 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(session.messages.count(), 0)
 
     @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_chat_returns_json_for_unexpected_exception(self, agent_cls):
+        agent_cls.return_value.chat.side_effect = RuntimeError("boom")
+
+        response = self.client.post(
+            reverse("research_agent_chat", kwargs={"doc_id": self.document.id}),
+            data={"message": "Help me with this paragraph."},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.json()["error"],
+            "The agent failed unexpectedly. The issue has been logged.",
+        )
+
+    @patch("editor.agent_views.DocumentResearchAgent")
     def test_agent_suggest_returns_structured_payload(self, agent_cls):
         agent = agent_cls.return_value
         agent.suggest.return_value = SuggestAgentResult(
@@ -206,6 +222,22 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(payload["selection_summary"], "Nexus support for gang-based persecution.")
         self.assertEqual(payload["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
         self.assertEqual(payload["tool_calls"][0]["source"], "biaedge")
+
+
+class AgentServiceTests(TestCase):
+    def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
+        self.assertEqual(
+            _normalize_mcp_server_url("biaedge-mcp.onrender.com"),
+            "https://biaedge-mcp.onrender.com/mcp",
+        )
+        self.assertEqual(
+            _normalize_mcp_server_url("https://biaedge-mcp.onrender.com"),
+            "https://biaedge-mcp.onrender.com/mcp",
+        )
+        self.assertEqual(
+            _normalize_mcp_server_url("http://localhost:8001"),
+            "http://localhost:8001/mcp",
+        )
 
 
 class CoverLetterExportTests(TestCase):

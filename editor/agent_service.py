@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from .document_text import clip_document_text, extract_plain_text
 from .exemplar_service import rank_exemplars
 from .models import Exemplar
 
+logger = logging.getLogger(__name__)
 
 AGENT_MODEL = os.environ.get("OPENAI_AGENT_MODEL", "gpt-5.4")
 AGENT_REASONING_EFFORT = os.environ.get("OPENAI_AGENT_REASONING_EFFORT", "high").strip().lower() or "high"
@@ -164,6 +166,11 @@ def _normalize_mcp_server_url(raw_url: str) -> str:
     normalized = (raw_url or "").strip()
     if not normalized:
         return ""
+
+    if "://" not in normalized:
+        host = normalized.lstrip("/")
+        scheme = "http" if host.startswith(("localhost", "127.0.0.1", "0.0.0.0")) else "https"
+        normalized = f"{scheme}://{host}"
 
     parsed = urlparse(normalized)
     if not parsed.scheme or not parsed.netloc:
@@ -477,6 +484,57 @@ def _stale_previous_response(exc: Exception) -> bool:
     )
 
 
+def _extract_error_text(payload: Any) -> str:
+    if isinstance(payload, dict):
+        nested = payload.get("error")
+        if isinstance(nested, dict):
+            message = str(nested.get("message") or "").strip()
+            if message:
+                return message
+        message = str(payload.get("message") or "").strip()
+        if message:
+            return message
+    elif isinstance(payload, str):
+        return payload.strip()
+    return ""
+
+
+def _openai_exception_message(exc: Exception) -> str:
+    detail = _extract_error_text(getattr(exc, "body", None))
+    if not detail:
+        detail = str(exc).strip() or exc.__class__.__name__
+
+    status_code = getattr(exc, "status_code", None)
+    if status_code:
+        return f"OpenAI request failed ({status_code}): {detail}"
+    return f"OpenAI request failed: {detail}"
+
+
+def _looks_like_mcp_setup_failure(exc: Exception) -> bool:
+    text = " ".join(
+        part
+        for part in [
+            str(exc).lower(),
+            _extract_error_text(getattr(exc, "body", None)).lower(),
+        ]
+        if part
+    )
+    return any(
+        token in text
+        for token in [
+            "mcp",
+            "server_url",
+            "remote mcp",
+            "connector",
+            "allowed_tools",
+            "approval",
+            "list tools",
+            "list_tools",
+            "tool type",
+        ]
+    )
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     raw = (text or "").strip()
     if not raw:
@@ -553,31 +611,65 @@ class DocumentResearchAgent:
         if not normalized_message:
             raise AgentExecutionError("A chat message is required.")
 
-        tools = self._build_tools(mode="chat")
-        input_text = self._chat_input(
-            message=normalized_message,
-            selected_text=selected_text,
-            transcript_messages=[],
-        )
-
+        used_mcp_fallback = False
         try:
-            result = self._run_response_loop(
-                instructions=_CHAT_SYSTEM_PROMPT,
-                input_payload=input_text,
-                tools=tools,
-                previous_response_id=(previous_response_id or "").strip() or None,
-                initial_tool_choice="auto",
-            )
-        except StaleResponseChainError:
-            rebuilt_input = self._chat_input(
+            tools = self._build_tools(mode="chat", include_mcp=True)
+            input_text = self._chat_input(
                 message=normalized_message,
                 selected_text=selected_text,
-                transcript_messages=transcript_messages or [],
+                transcript_messages=[],
             )
+
+            try:
+                result = self._run_response_loop(
+                    instructions=_CHAT_SYSTEM_PROMPT,
+                    input_payload=input_text,
+                    tools=tools,
+                    previous_response_id=(previous_response_id or "").strip() or None,
+                    initial_tool_choice="auto",
+                )
+            except StaleResponseChainError:
+                rebuilt_input = self._chat_input(
+                    message=normalized_message,
+                    selected_text=selected_text,
+                    transcript_messages=transcript_messages or [],
+                )
+                result = self._run_response_loop(
+                    instructions=_CHAT_SYSTEM_PROMPT,
+                    input_payload=rebuilt_input,
+                    tools=tools,
+                    previous_response_id=None,
+                    initial_tool_choice="auto",
+                )
+        except AgentConfigurationError as exc:
+            if "BIAEDGE_MCP_SERVER_URL" not in str(exc):
+                raise
+            used_mcp_fallback = True
+            logger.warning("Document agent chat continuing without BIA Edge MCP because it is not configured.")
             result = self._run_response_loop(
-                instructions=_CHAT_SYSTEM_PROMPT,
-                input_payload=rebuilt_input,
-                tools=tools,
+                instructions=self._chat_fallback_instructions(),
+                input_payload=self._chat_input(
+                    message=normalized_message,
+                    selected_text=selected_text,
+                    transcript_messages=transcript_messages or [],
+                ),
+                tools=self._build_tools(mode="chat", include_mcp=False),
+                previous_response_id=None,
+                initial_tool_choice="auto",
+            )
+        except AgentExecutionError as exc:
+            if not self._has_mcp_tools(tools=locals().get("tools", [])) or not _looks_like_mcp_setup_failure(exc):
+                raise
+            used_mcp_fallback = True
+            logger.warning("Document agent chat retrying without BIA Edge MCP after setup failure: %s", exc)
+            result = self._run_response_loop(
+                instructions=self._chat_fallback_instructions(),
+                input_payload=self._chat_input(
+                    message=normalized_message,
+                    selected_text=selected_text,
+                    transcript_messages=transcript_messages or [],
+                ),
+                tools=self._build_tools(mode="chat", include_mcp=False),
                 previous_response_id=None,
                 initial_tool_choice="auto",
             )
@@ -591,6 +683,7 @@ class DocumentResearchAgent:
             metadata={
                 "model": AGENT_MODEL,
                 "reasoning_effort": AGENT_REASONING_EFFORT,
+                "mcp_fallback": used_mcp_fallback,
             },
         )
 
@@ -639,17 +732,30 @@ class DocumentResearchAgent:
             raw_answer=result["answer"],
         )
 
-    def _build_tools(self, *, mode: str) -> list[dict[str, Any]]:
+    def _build_tools(self, *, mode: str, include_mcp: bool = True) -> list[dict[str, Any]]:
         allowed_tools = _BIAEDGE_CHAT_TOOLS if mode == "chat" else _BIAEDGE_SUGGEST_TOOLS
         tools = [
-            _build_biaedge_mcp_tool(allowed_tools=allowed_tools),
             _build_web_search_tool(),
             *_knowledge_function_tools(),
         ]
+        if include_mcp:
+            tools.insert(0, _build_biaedge_mcp_tool(allowed_tools=allowed_tools))
         file_search = _build_file_search_tool()
         if file_search:
             tools.append(file_search)
         return tools
+
+    def _has_mcp_tools(self, *, tools: list[dict[str, Any]]) -> bool:
+        return any((tool.get("type") or "").strip() == "mcp" for tool in tools)
+
+    def _chat_fallback_instructions(self) -> str:
+        return (
+            _CHAT_SYSTEM_PROMPT
+            + "\n\nRuntime note:\n"
+            + "BIA Edge database access is unavailable for this turn. "
+            + "Do not claim you searched the database. "
+            + "Use only the remaining tools, and say explicitly if database verification would materially matter."
+        )
 
     def _document_context_block(self, *, selected_text: str = "", focus_note: str = "") -> str:
         doc_type = self.document.document_type.name if self.document.document_type else "Unknown"
@@ -766,7 +872,18 @@ class DocumentResearchAgent:
         except Exception as exc:
             if previous_response_id and _stale_previous_response(exc):
                 raise StaleResponseChainError(str(exc)) from exc
-            raise
+            logger.exception(
+                "Document research agent response creation failed",
+                extra={
+                    "document_id": str(self.document.id),
+                    "user_id": getattr(self.user, "id", None),
+                    "model": AGENT_MODEL,
+                    "tool_choice": tool_choice,
+                    "has_previous_response_id": bool(previous_response_id),
+                    "tool_types": [tool.get("type") for tool in tools if isinstance(tool, dict)],
+                },
+            )
+            raise AgentExecutionError(_openai_exception_message(exc)) from exc
 
     def _run_response_loop(
         self,
@@ -841,8 +958,9 @@ class DocumentResearchAgent:
                 continue
 
             if status not in {"completed", ""}:
+                error_message = _extract_error_text(getattr(response, "error", None))
                 raise AgentExecutionError(
-                    f"OpenAI response returned status={status or 'unknown'}."
+                    error_message or f"OpenAI response returned status={status or 'unknown'}."
                 )
             break
 

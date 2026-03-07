@@ -1,4 +1,5 @@
 import json
+import logging
 
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
@@ -7,6 +8,8 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .agent_service import AgentConfigurationError, AgentExecutionError, DocumentResearchAgent
 from .models import Document, DocumentResearchMessage, DocumentResearchSession
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_message(message):
@@ -78,6 +81,15 @@ def agent_chat(request, doc_id):
         return JsonResponse({"error": str(exc)}, status=503)
     except AgentExecutionError as exc:
         return JsonResponse({"error": str(exc)}, status=502)
+    except Exception:
+        logger.exception(
+            "Unexpected document agent chat failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id},
+        )
+        return JsonResponse(
+            {"error": "The agent failed unexpectedly. The issue has been logged."},
+            status=500,
+        )
 
     user_message = DocumentResearchMessage.objects.create(
         session=session,
@@ -141,6 +153,15 @@ def agent_suggest(request, doc_id):
         return JsonResponse({"error": str(exc)}, status=503)
     except AgentExecutionError as exc:
         return JsonResponse({"error": str(exc)}, status=502)
+    except Exception:
+        logger.exception(
+            "Unexpected document agent suggest failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id},
+        )
+        return JsonResponse(
+            {"error": "The agent failed unexpectedly. The issue has been logged."},
+            status=500,
+        )
 
     return JsonResponse(
         {
