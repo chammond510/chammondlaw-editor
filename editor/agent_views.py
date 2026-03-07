@@ -69,8 +69,8 @@ def agent_chat(request, doc_id):
         return JsonResponse({"error": "message is required"}, status=400)
 
     transcript_messages = list(session.messages.order_by("created_at"))
-    agent = DocumentResearchAgent(document=document, user=request.user)
     try:
+        agent = DocumentResearchAgent(document=document, user=request.user)
         result = agent.chat(
             message=message,
             selected_text=selected_text,
@@ -91,25 +91,35 @@ def agent_chat(request, doc_id):
             status=500,
         )
 
-    user_message = DocumentResearchMessage.objects.create(
-        session=session,
-        role="user",
-        content=message,
-        selection_text=selected_text,
-        metadata={"used_selection": bool(selected_text)},
-    )
-    assistant_message = DocumentResearchMessage.objects.create(
-        session=session,
-        role="assistant",
-        content=result.answer,
-        selection_text=selected_text,
-        response_id=result.response_id,
-        tool_calls=result.tool_calls,
-        citations=result.citations,
-        metadata=result.metadata,
-    )
-    session.last_response_id = result.response_id
-    session.save(update_fields=["last_response_id", "updated_at"])
+    try:
+        user_message = DocumentResearchMessage.objects.create(
+            session=session,
+            role="user",
+            content=message,
+            selection_text=selected_text,
+            metadata={"used_selection": bool(selected_text)},
+        )
+        assistant_message = DocumentResearchMessage.objects.create(
+            session=session,
+            role="assistant",
+            content=result.answer,
+            selection_text=selected_text,
+            response_id=result.response_id,
+            tool_calls=result.tool_calls,
+            citations=result.citations,
+            metadata=result.metadata,
+        )
+        session.last_response_id = result.response_id
+        session.save(update_fields=["last_response_id", "updated_at"])
+    except Exception:
+        logger.exception(
+            "Unexpected document agent chat persistence failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id},
+        )
+        return JsonResponse(
+            {"error": "The agent answered, but saving the chat thread failed."},
+            status=500,
+        )
 
     return JsonResponse(
         {
@@ -146,8 +156,8 @@ def agent_suggest(request, doc_id):
     if not selected_text:
         return JsonResponse({"error": "selected_text is required"}, status=400)
 
-    agent = DocumentResearchAgent(document=document, user=request.user)
     try:
+        agent = DocumentResearchAgent(document=document, user=request.user)
         result = agent.suggest(selected_text=selected_text, focus_note=focus_note)
     except AgentConfigurationError as exc:
         return JsonResponse({"error": str(exc)}, status=503)

@@ -7,7 +7,12 @@ from django.test import TestCase
 from django.urls import reverse
 from docx import Document as DocxDocument
 
-from .agent_service import ChatAgentResult, SuggestAgentResult, _normalize_mcp_server_url
+from .agent_service import (
+    AgentConfigurationError,
+    ChatAgentResult,
+    SuggestAgentResult,
+    _normalize_mcp_server_url,
+)
 from .models import (
     Document,
     DocumentResearchMessage,
@@ -181,6 +186,22 @@ class AgentResearchViewsTests(TestCase):
         )
 
     @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_chat_returns_json_for_constructor_configuration_error(self, agent_cls):
+        agent_cls.side_effect = AgentConfigurationError("OPENAI_API_KEY is not configured.")
+
+        response = self.client.post(
+            reverse("research_agent_chat", kwargs={"doc_id": self.document.id}),
+            data={"message": "Help me with this paragraph."},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["error"],
+            "OPENAI_API_KEY is not configured.",
+        )
+
+    @patch("editor.agent_views.DocumentResearchAgent")
     def test_agent_suggest_returns_structured_payload(self, agent_cls):
         agent = agent_cls.return_value
         agent.suggest.return_value = SuggestAgentResult(
@@ -222,6 +243,22 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(payload["selection_summary"], "Nexus support for gang-based persecution.")
         self.assertEqual(payload["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
         self.assertEqual(payload["tool_calls"][0]["source"], "biaedge")
+
+    @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_suggest_returns_json_for_constructor_configuration_error(self, agent_cls):
+        agent_cls.side_effect = AgentConfigurationError("OPENAI_API_KEY is not configured.")
+
+        response = self.client.post(
+            reverse("research_agent_suggest", kwargs={"doc_id": self.document.id}),
+            data={"selected_text": "Selected text"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["error"],
+            "OPENAI_API_KEY is not configured.",
+        )
 
 
 class AgentServiceTests(TestCase):
