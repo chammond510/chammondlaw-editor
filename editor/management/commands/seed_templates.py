@@ -95,6 +95,70 @@ def _basic_template_content(title, sections, salutation="Dear Officer:"):
     return {"type": "doc", "content": content}
 
 
+def _uscis_cover_letter_template_content(subject, sections, party_lines=None, salutation="Dear USCIS Officer:"):
+    content = [
+        _p("[Mailing Method]"),
+        _p(""),
+        _p("[Date]"),
+        _p(""),
+        _p("U.S. Citizenship and Immigration Services"),
+        _p("[Lockbox / Service Center / Field Office]"),
+        _p("[Address Line 1]"),
+        _p("[Address Line 2]"),
+        _p(""),
+        _mixed_paragraph([
+            ("RE:", [{"type": "bold"}]),
+            ("\t", [{"type": "bold"}]),
+            (subject, [{"type": "bold"}, {"type": "underline"}]),
+        ]),
+    ]
+    for line in party_lines or []:
+        content.append(
+            _mixed_paragraph([
+                (f"{line[0]}: ", [{"type": "bold"}]),
+                (line[1], [{"type": "bold"}]),
+            ])
+        )
+
+    content.extend([
+        _p(""),
+        _p(salutation),
+        _p(""),
+        _p("[Introduce the filing, the applicant or petitioner, the requested benefit, and the legal basis for the submission.]"),
+        _p(""),
+    ])
+
+    for index, heading in enumerate(sections):
+        letter = chr(ord("A") + index)
+        content.extend([
+            _h(f"{letter}. {heading}", 2),
+            _p(f"[Draft {heading.lower()} for this matter.]"),
+            _p(""),
+        ])
+
+    content.extend([
+        _p("Please find enclosed the following documents in support of this filing:"),
+        _p(""),
+        _h("Forms", 3),
+        _bullet_list([
+            "[Primary USCIS form]",
+            "[Form G-28]",
+        ]),
+        _p(""),
+        _h("Supporting Evidence", 3),
+        _bullet_list([
+            "[Supporting document 1]",
+            "[Supporting document 2]",
+            "[Supporting document 3]",
+        ]),
+        _p(""),
+        _p("[Concluding request and contact sentence.]"),
+        _p(""),
+        _p("Respectfully submitted,"),
+    ])
+    return {"type": "doc", "content": content}
+
+
 TEMPLATES = [
     {
         "name": "I-130 Cover Letter",
@@ -824,6 +888,16 @@ ADDITIONAL_TEMPLATE_DEFS = [
 
 
 for idx, template in enumerate(ADDITIONAL_TEMPLATE_DEFS, start=9):
+    if template["category"] == "cover_letter":
+        template_content = _uscis_cover_letter_template_content(
+            template["name"],
+            template["sections"],
+            party_lines=[("Applicant / Petitioner", "[Full Name]")],
+        )
+    else:
+        template_content = _basic_template_content(
+            template["name"].upper(), template["sections"]
+        )
     TEMPLATES.append(
         {
             "name": template["name"],
@@ -833,9 +907,7 @@ for idx, template in enumerate(ADDITIONAL_TEMPLATE_DEFS, start=9):
             "icon": template["icon"],
             "order": idx,
             "description": template["description"],
-            "template_content": _basic_template_content(
-                template["name"].upper(), template["sections"]
-            ),
+            "template_content": template_content,
         }
     )
 

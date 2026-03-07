@@ -28,9 +28,18 @@ class DocumentVersionAdmin(admin.ModelAdmin):
 
 @admin.register(Exemplar)
 class ExemplarAdmin(admin.ModelAdmin):
-    list_display = ["title", "document_type", "case_type", "outcome", "created_by", "updated_at"]
-    list_filter = ["outcome", "document_type", "case_type"]
-    search_fields = ["title", "case_type", "extracted_text"]
+    list_display = [
+        "title",
+        "kind",
+        "style_family",
+        "document_type",
+        "case_type",
+        "is_default",
+        "created_by",
+        "updated_at",
+    ]
+    list_filter = ["kind", "style_family", "is_default", "is_active", "outcome", "document_type", "case_type"]
+    search_fields = ["title", "style_family", "case_type", "extracted_text"]
 
 
 @admin.register(DocumentResearchSession)

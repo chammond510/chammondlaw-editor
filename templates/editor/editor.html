@@ -166,8 +166,20 @@
                         <option value="pending">Pending</option>
                     </select>
                 </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <select id="exemplar-kind" name="kind" class="border rounded px-2 py-1 text-xs">
+                        <option value="matter_exemplar">Matter exemplar</option>
+                        <option value="style_anchor">Style anchor</option>
+                        <option value="section_template">Section template</option>
+                    </select>
+                    <input type="text" id="exemplar-style-family" name="style_family" class="border rounded px-2 py-1 text-xs" value="uscis_cover_letter" placeholder="Style family">
+                </div>
                 <input type="text" id="exemplar-case-type" name="case_type" class="w-full border rounded px-2 py-1 text-xs" placeholder="Case type (e.g., asylum)">
                 <input type="text" id="exemplar-tags" name="tags" class="w-full border rounded px-2 py-1 text-xs" placeholder="Tags (comma separated)">
+                <label class="flex items-center gap-2 text-xs text-gray-600">
+                    <input type="checkbox" id="exemplar-is-default" name="is_default" class="rounded border-gray-300">
+                    Use as default style anchor
+                </label>
                 <button type="submit" class="w-full px-2 py-1 text-xs bg-navy text-white rounded">Upload</button>
             </form>
         </div>
@@ -949,6 +961,11 @@ exemplarForm.addEventListener('submit', async (e) => {
   formData.append('title', document.getElementById('exemplar-title').value);
   formData.append('document_type_id', document.getElementById('exemplar-document-type').value);
   formData.append('outcome', document.getElementById('exemplar-outcome').value);
+  formData.append('kind', document.getElementById('exemplar-kind').value);
+  formData.append('style_family', document.getElementById('exemplar-style-family').value);
+  if (document.getElementById('exemplar-is-default').checked) {
+    formData.append('is_default', 'true');
+  }
   formData.append('case_type', document.getElementById('exemplar-case-type').value);
   formData.append('tags', document.getElementById('exemplar-tags').value);
 

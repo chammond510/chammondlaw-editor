@@ -6,11 +6,15 @@ Supports format presets for legal documents (court briefs, cover letters, declar
 """
 
 import io
+import re
 from html import escape
 
 from docx import Document as DocxDocument
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_BREAK
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 
 FORMAT_PRESETS = {
@@ -38,8 +42,30 @@ FORMAT_PRESETS = {
     },
 }
 
+DATE_PATTERN = re.compile(r"^\s*(\[[Dd]ate\]|[A-Z][a-z]+ \d{1,2}, \d{4}|\d{1,2}/\d{1,2}/\d{2,4})")
+
 
 def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
+    """Convert Tiptap JSON content to a .docx file buffer."""
+    return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
+
+
+def tiptap_to_docx_with_style_anchor(
+    tiptap_json,
+    title="Document",
+    export_format="court_brief",
+    style_anchor=None,
+):
+    if export_format == "cover_letter" and style_anchor:
+        return _tiptap_to_cover_letter_docx(
+            tiptap_json=tiptap_json,
+            title=title,
+            style_anchor=style_anchor,
+        )
+    return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
+
+
+def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_brief"):
     """Convert Tiptap JSON content to a .docx file buffer."""
     doc = DocxDocument()
     preset = FORMAT_PRESETS.get(export_format, FORMAT_PRESETS["court_brief"])
@@ -98,6 +124,477 @@ def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
     doc.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def _tiptap_to_cover_letter_docx(*, tiptap_json, title, style_anchor):
+    template_doc = DocxDocument(style_anchor.path)
+    sample_doc = DocxDocument(style_anchor.path)
+    _clear_document_body(template_doc)
+
+    samples = _cover_letter_samples(sample_doc, style_anchor.metadata.get("style_anchor_structure") or {})
+    content = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
+
+    for paragraph in samples["letterhead"]:
+        _copy_sample_paragraph(template_doc, paragraph)
+    template_doc.add_paragraph("")
+    template_doc.add_paragraph("")
+
+    state = {
+        "body_started": False,
+        "saw_re_line": False,
+        "in_exhibit_section": False,
+        "exhibit_counter": 1,
+        "closing_requested": False,
+        "signature_started": False,
+        "intro_paragraphs_written": 0,
+    }
+
+    for node in content:
+        _process_cover_letter_node(template_doc, node, samples, state)
+
+    template_doc.add_paragraph("")
+    _copy_sample_paragraph(template_doc, samples["closing_salutation"])
+
+    template_doc.add_paragraph("")
+    template_doc.add_paragraph("")
+    _render_signature_block(template_doc, samples["signature"])
+
+    buffer = io.BytesIO()
+    template_doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def _clear_document_body(doc):
+    body = doc._element.body
+    for child in list(body):
+        if child.tag == qn("w:sectPr"):
+            continue
+        body.remove(child)
+
+
+def _cover_letter_samples(doc, structure):
+    items = []
+    for paragraph in doc.paragraphs:
+        text = (paragraph.text or "").replace("\xa0", " ").strip()
+        if text:
+            items.append({"paragraph": paragraph, "text": text})
+
+    def find_text(prefix, *, from_end=False):
+        iterable = reversed(items) if from_end else items
+        for item in iterable:
+            if item["text"].startswith(prefix):
+                return item["paragraph"]
+        return None
+
+    letterhead_lines = structure.get("letterhead_lines") or []
+    signature_lines = structure.get("signature_lines") or []
+
+    letterhead = []
+    for line in letterhead_lines:
+        paragraph = find_text(line)
+        if paragraph:
+            letterhead.append(paragraph)
+    if not letterhead:
+        letterhead = [item["paragraph"] for item in items[:6]]
+
+    signature = []
+    for line in signature_lines:
+        paragraph = find_text(line, from_end=True)
+        if paragraph:
+            signature.append(paragraph)
+    if not signature:
+        signature = [item["paragraph"] for item in items[-6:]]
+
+    service_line = find_text("Via ") or items[min(6, len(items) - 1)]["paragraph"]
+    date_line = next(
+        (
+            item["paragraph"]
+            for item in items
+            if re.match(r"^([A-Z][a-z]+ \d{1,2}, \d{4}|\[Date\]|\d{1,2}/\d{1,2}/\d{2,4})", item["text"])
+        ),
+        service_line,
+    )
+    re_line = find_text("RE:") or items[min(8, len(items) - 1)]["paragraph"]
+    subject_line = find_text("Applicant:") or items[min(9, len(items) - 1)]["paragraph"]
+    salutation = find_text("Dear ") or items[min(10, len(items) - 1)]["paragraph"]
+    intro = next(
+        (
+            item["paragraph"]
+            for item in items
+            if item["text"].startswith("Undersigned counsel")
+        ),
+        items[min(11, len(items) - 1)]["paragraph"],
+    )
+    body = next(
+        (
+            item["paragraph"]
+            for item in items
+            if item["paragraph"].paragraph_format.first_line_indent
+            and int(item["paragraph"].paragraph_format.first_line_indent) > 0
+        ),
+        intro,
+    )
+    section_heading = next(
+        (
+            item["paragraph"]
+            for item in items
+            if item["paragraph"].style.name == "List Paragraph"
+            and any(run.bold for run in item["paragraph"].runs)
+        ),
+        body,
+    )
+    exhibit_category = next(
+        (
+            item["paragraph"]
+            for item in items
+            if item["text"].endswith(":")
+            and any(run.underline and run.italic for run in item["paragraph"].runs)
+        ),
+        section_heading,
+    )
+    closing_salutation = find_text("Respectfully submitted") or items[-7]["paragraph"]
+
+    return {
+        "letterhead": letterhead,
+        "signature": signature,
+        "service_line": service_line,
+        "date_line": date_line,
+        "address_line": items[min(7, len(items) - 1)]["paragraph"],
+        "re_line": re_line,
+        "subject_line": subject_line,
+        "salutation": salutation,
+        "intro": intro,
+        "body": body,
+        "section_heading": section_heading,
+        "exhibit_category": exhibit_category,
+        "closing_salutation": closing_salutation,
+    }
+
+
+def _copy_paragraph_style(target, sample):
+    target.style = sample.style
+    target.alignment = sample.alignment
+    source_format = sample.paragraph_format
+    target_format = target.paragraph_format
+    target_format.left_indent = source_format.left_indent
+    target_format.right_indent = source_format.right_indent
+    target_format.first_line_indent = source_format.first_line_indent
+    target_format.space_before = source_format.space_before
+    target_format.space_after = source_format.space_after
+    target_format.line_spacing = source_format.line_spacing
+    target_format.line_spacing_rule = source_format.line_spacing_rule
+    target_format.keep_together = source_format.keep_together
+    target_format.keep_with_next = source_format.keep_with_next
+    target_format.page_break_before = source_format.page_break_before
+    target_format.widow_control = source_format.widow_control
+
+
+def _copy_run_style(target_run, sample_run):
+    if not sample_run:
+        return
+    target_run.bold = sample_run.bold
+    target_run.italic = sample_run.italic
+    target_run.underline = sample_run.underline
+    target_run.style = sample_run.style
+    target_run.font.name = sample_run.font.name
+    target_run.font.size = sample_run.font.size
+    target_run.font.bold = sample_run.font.bold
+    target_run.font.italic = sample_run.font.italic
+    target_run.font.underline = sample_run.font.underline
+    target_run.font.all_caps = sample_run.font.all_caps
+    target_run.font.small_caps = sample_run.font.small_caps
+    target_run.font.superscript = sample_run.font.superscript
+    target_run.font.subscript = sample_run.font.subscript
+    target_run.font.strike = sample_run.font.strike
+
+
+def _copy_sample_paragraph(doc, sample):
+    paragraph = doc.add_paragraph()
+    _copy_paragraph_style(paragraph, sample)
+    for sample_run in sample.runs:
+        run = paragraph.add_run(sample_run.text)
+        _copy_run_style(run, sample_run)
+    return paragraph
+
+
+def _render_signature_block(doc, signature_samples):
+    for sample in signature_samples:
+        line = (sample.text or "").replace("\xa0", " ").strip()
+        if not line:
+            continue
+        paragraph = doc.add_paragraph()
+        _copy_paragraph_style(paragraph, sample)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = paragraph.add_run(line)
+        _copy_run_style(run, sample.runs[0] if sample.runs else None)
+
+
+def _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run):
+    for part in inline_parts:
+        part_type = part.get("type")
+        if part_type == "text":
+            run = paragraph.add_run(part.get("text", ""))
+            _copy_run_style(run, sample_run)
+            marks = part.get("marks", {})
+            if "bold" in marks:
+                run.bold = True
+            if "italic" in marks:
+                run.italic = True
+            if "underline" in marks:
+                run.underline = True
+            if "strike" in marks:
+                run.font.strike = True
+            if "superscript" in marks:
+                run.font.superscript = True
+            if "subscript" in marks:
+                run.font.subscript = True
+        elif part_type == "hardBreak":
+            paragraph.add_run().add_break(WD_BREAK.LINE)
+
+
+def _add_paragraph_from_parts(doc, sample, inline_parts):
+    paragraph = doc.add_paragraph()
+    _copy_paragraph_style(paragraph, sample)
+    sample_run = sample.runs[0] if sample.runs else None
+    _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run)
+    return paragraph
+
+
+def _node_plain_text(node):
+    text_parts = []
+    for part in _extract_inline_parts(node):
+        if part.get("type") == "text":
+            text_parts.append(part.get("text", ""))
+    return "".join(text_parts).replace("\xa0", " ").strip()
+
+
+def _looks_like_subject_detail(text):
+    prefixes = (
+        "Applicant:",
+        "Petitioner:",
+        "Beneficiary:",
+        "Joint Petitioner:",
+        "Receipt Number:",
+        "A#:",
+        "A#:",
+        "Form Type:",
+        "Qualifying Relative:",
+    )
+    return text.startswith(prefixes)
+
+
+def _looks_like_signature_detail(text):
+    lowered = text.lower()
+    return lowered.startswith("christopher hammond") or lowered.startswith("chris hammond law firm") or lowered.startswith("attorney for ") or lowered.startswith("24 greenway plaza") or lowered.startswith("houston, texas") or lowered.startswith("tel.") or lowered.startswith("email.")
+
+
+def _is_exhibit_heading(text):
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in [
+            "enclosed documentation",
+            "evidence submitted",
+            "supporting evidence",
+            "exhibits",
+            "evidence index",
+            "please find enclosed",
+            "please find attached",
+        ]
+    )
+
+
+def _is_exhibit_category(text):
+    return text.endswith(":") and len(text) <= 120
+
+
+def _render_re_line(doc, sample, text):
+    paragraph = doc.add_paragraph()
+    _copy_paragraph_style(paragraph, sample)
+    subject = text[3:].strip() if text.startswith("RE:") else text.strip()
+    label_run = paragraph.add_run("RE:")
+    _copy_run_style(label_run, sample.runs[0] if sample.runs else None)
+    tab_run = paragraph.add_run("\t")
+    _copy_run_style(tab_run, sample.runs[1] if len(sample.runs) > 1 else sample.runs[0] if sample.runs else None)
+    subject_run = paragraph.add_run(subject)
+    subject_sample = sample.runs[2] if len(sample.runs) > 2 else sample.runs[-1] if sample.runs else None
+    _copy_run_style(subject_run, subject_sample)
+    return paragraph
+
+
+def _render_subject_detail(doc, sample, text):
+    paragraph = doc.add_paragraph()
+    _copy_paragraph_style(paragraph, sample)
+    run = paragraph.add_run(text)
+    _copy_run_style(run, sample.runs[0] if sample.runs else None)
+    return paragraph
+
+
+def _render_exhibit_heading(doc, sample, text):
+    paragraph = doc.add_paragraph()
+    _copy_paragraph_style(paragraph, sample)
+    run = paragraph.add_run(text if text.endswith(":") else f"{text}:")
+    _copy_run_style(run, sample.runs[0] if sample.runs else None)
+    return paragraph
+
+
+def _remove_table_borders(table):
+    table_element = table._tbl
+    table_properties = table_element.tblPr
+    borders = table_properties.first_child_found_in("w:tblBorders")
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        table_properties.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        edge_element = borders.find(qn(f"w:{edge}"))
+        if edge_element is None:
+            edge_element = OxmlElement(f"w:{edge}")
+            borders.append(edge_element)
+        edge_element.set(qn("w:val"), "nil")
+
+
+def _render_exhibit_table(doc, items, samples, counter_start):
+    table = doc.add_table(rows=0, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    _remove_table_borders(table)
+    label_sample = samples["section_heading"].runs[0] if samples["section_heading"].runs else None
+    text_sample = samples["body"].runs[0] if samples["body"].runs else None
+    for offset, item in enumerate(items):
+        row = table.add_row()
+        row.cells[0].width = Inches(1.55)
+        row.cells[1].width = Inches(4.95)
+        label_paragraph = row.cells[0].paragraphs[0]
+        label_paragraph.style = doc.styles["Normal"]
+        label_run = label_paragraph.add_run(f"EXHIBIT {counter_start + offset}")
+        _copy_run_style(label_run, label_sample)
+        label_run.bold = True
+
+        text_paragraph = row.cells[1].paragraphs[0]
+        _copy_paragraph_style(text_paragraph, samples["body"])
+        text_paragraph.paragraph_format.first_line_indent = Inches(0)
+        text_paragraph.paragraph_format.left_indent = Inches(0)
+        text_run = text_paragraph.add_run(item.rstrip(";") + ";")
+        _copy_run_style(text_run, text_sample)
+    return counter_start + len(items)
+
+
+def _process_cover_letter_node(doc, node, samples, state):
+    node_type = node.get("type", "")
+    text = _node_plain_text(node)
+
+    if state["signature_started"]:
+        return
+
+    if node_type == "paragraph":
+        if not text:
+            doc.add_paragraph("")
+            return
+        if _looks_like_signature_detail(text):
+            state["signature_started"] = True
+            return
+        if text.startswith("Respectfully submitted"):
+            state["closing_requested"] = True
+            return
+
+        inline_parts = _extract_inline_parts(node)
+        if not state["body_started"]:
+            if text.startswith("Via "):
+                _add_paragraph_from_parts(doc, samples["service_line"], inline_parts)
+                return
+            if DATE_PATTERN.match(text):
+                _add_paragraph_from_parts(doc, samples["date_line"], inline_parts)
+                return
+            if text.startswith("RE:"):
+                _render_re_line(doc, samples["re_line"], text)
+                state["saw_re_line"] = True
+                return
+            if _looks_like_subject_detail(text):
+                _render_subject_detail(doc, samples["subject_line"], text)
+                return
+            if text.lower().startswith("dear "):
+                _add_paragraph_from_parts(doc, samples["salutation"], inline_parts)
+                state["body_started"] = True
+                return
+            _add_paragraph_from_parts(doc, samples["address_line"], inline_parts)
+            return
+
+        if _is_exhibit_heading(text):
+            state["in_exhibit_section"] = True
+            _add_paragraph_from_parts(doc, samples["body"], inline_parts)
+            return
+        if state["in_exhibit_section"] and _is_exhibit_category(text):
+            _render_exhibit_heading(doc, samples["exhibit_category"], text)
+            return
+
+        sample = samples["intro"] if state["intro_paragraphs_written"] < 2 else samples["body"]
+        _add_paragraph_from_parts(doc, sample, inline_parts)
+        state["intro_paragraphs_written"] += 1
+        return
+
+    if node_type == "heading":
+        if not text:
+            return
+        level = node.get("attrs", {}).get("level", 1)
+        if not state["body_started"] and level == 1 and not state["saw_re_line"]:
+            _render_re_line(doc, samples["re_line"], f"RE: {text.title() if text.isupper() else text}")
+            state["saw_re_line"] = True
+            return
+        if _is_exhibit_heading(text):
+            state["in_exhibit_section"] = True
+        if state["in_exhibit_section"] and level >= 3:
+            _render_exhibit_heading(doc, samples["exhibit_category"], text)
+            return
+        paragraph = doc.add_paragraph()
+        _copy_paragraph_style(paragraph, samples["section_heading"])
+        run = paragraph.add_run(text)
+        _copy_run_style(run, samples["section_heading"].runs[0] if samples["section_heading"].runs else None)
+        run.bold = True
+        state["body_started"] = True
+        state["intro_paragraphs_written"] += 1
+        return
+
+    if node_type == "bulletList":
+        items = []
+        for item in node.get("content", []):
+            for child in item.get("content", []):
+                if child.get("type") == "paragraph":
+                    item_text = _node_plain_text(child)
+                    if item_text:
+                        items.append(item_text)
+        if not items:
+            return
+        if state["in_exhibit_section"]:
+            state["exhibit_counter"] = _render_exhibit_table(doc, items, samples, state["exhibit_counter"])
+            return
+        for item_text in items:
+            paragraph = doc.add_paragraph(style="List Bullet")
+            run = paragraph.add_run(item_text)
+            _copy_run_style(run, samples["body"].runs[0] if samples["body"].runs else None)
+        return
+
+    if node_type == "orderedList":
+        items = []
+        for item in node.get("content", []):
+            for child in item.get("content", []):
+                if child.get("type") == "paragraph":
+                    item_text = _node_plain_text(child)
+                    if item_text:
+                        items.append(item_text)
+        for number, item_text in enumerate(items, start=1):
+            paragraph = doc.add_paragraph(style="List Number")
+            run = paragraph.add_run(item_text)
+            _copy_run_style(run, samples["body"].runs[0] if samples["body"].runs else None)
+        return
+
+    if node_type == "table":
+        _process_table(doc, node, FORMAT_PRESETS["cover_letter"], [])
+        return
+
+    if node_type == "pageBreak":
+        paragraph = doc.add_paragraph()
+        paragraph.add_run().add_break(WD_BREAK.PAGE)
+        return
 
 
 def _process_node(doc, node, preset, para_counter, footnotes):

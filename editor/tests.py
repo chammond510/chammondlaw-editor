@@ -1,8 +1,10 @@
 from unittest.mock import patch
+from io import BytesIO
 
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.urls import reverse
+from docx import Document as DocxDocument
 
 from .agent_service import ChatAgentResult, SuggestAgentResult
 from .models import (
@@ -26,6 +28,60 @@ def _sample_tiptap(text):
                     }
                 ],
             }
+        ],
+    }
+
+
+def _sample_cover_letter():
+    return {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Via FedEx"}]},
+            {"type": "paragraph", "content": []},
+            {"type": "paragraph", "content": [{"type": "text", "text": "March 7, 2026"}]},
+            {"type": "paragraph", "content": []},
+            {"type": "paragraph", "content": [{"type": "text", "text": "U.S. Citizenship and Immigration Services"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Dallas Lockbox"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "P.O. Box 660867"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Dallas, TX 75266"}]},
+            {"type": "paragraph", "content": []},
+            {"type": "paragraph", "content": [{"type": "text", "text": "RE: Form I-130, Petition for Alien Relative"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Petitioner: Jane Doe"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Beneficiary: John Doe"}]},
+            {"type": "paragraph", "content": []},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Dear USCIS Officer:"}]},
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "Please find enclosed this Form I-130 filing and supporting documentation."}],
+            },
+            {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "A. Case Summary"}]},
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "The petitioner is a U.S. citizen seeking classification for her spouse."}],
+            },
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "Please find enclosed the following documents in support of this filing:"}],
+            },
+            {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Forms"}]},
+            {
+                "type": "bulletList",
+                "content": [
+                    {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Form I-130, Petition for Alien Relative"}]}]},
+                    {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Form G-28, Notice of Entry of Appearance"}]}]},
+                ],
+            },
+            {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Supporting Evidence"}]},
+            {
+                "type": "bulletList",
+                "content": [
+                    {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Marriage certificate"}]}]},
+                    {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Petitioner passport copy"}]}]},
+                ],
+            },
+            {"type": "paragraph", "content": [{"type": "text", "text": "Respectfully submitted,"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Chris Hammond"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Attorney for Petitioner"}]},
         ],
     }
 
@@ -149,3 +205,39 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(payload["selection_summary"], "Nexus support for gang-based persecution.")
         self.assertEqual(payload["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
         self.assertEqual(payload["tool_calls"][0]["source"], "biaedge")
+
+
+class CoverLetterExportTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="exporter", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="I-130 Cover Letter",
+            slug="i-130-cover-letter-test",
+            category="cover_letter",
+            export_format="cover_letter",
+            template_content=_sample_cover_letter(),
+        )
+        self.document = Document.objects.create(
+            title="I-130 Cover Letter",
+            document_type=self.document_type,
+            content=_sample_cover_letter(),
+            created_by=self.user,
+        )
+
+    def test_docx_export_uses_cover_letter_style_anchor(self):
+        response = self.client.get(reverse("export_docx", kwargs={"doc_id": self.document.id}))
+
+        self.assertEqual(response.status_code, 200)
+        exported = DocxDocument(BytesIO(response.content))
+        non_empty = [p.text.strip() for p in exported.paragraphs if p.text.strip()]
+
+        self.assertGreaterEqual(len(non_empty), 10)
+        self.assertEqual(non_empty[0], "Chris Hammond Law Firm")
+        self.assertIn("Immigration Attorney", non_empty[:6])
+        self.assertIn("RE:\tForm I-130, Petition for Alien Relative", non_empty)
+        self.assertIn("Respectfully submitted,", non_empty)
+        self.assertIn("Christopher Hammond, Esq.", non_empty)
+        self.assertGreaterEqual(len(exported.tables), 2)
+        self.assertEqual(exported.tables[0].cell(0, 0).text.strip(), "EXHIBIT 1")
+        self.assertEqual(exported.tables[0].cell(1, 0).text.strip(), "EXHIBIT 2")

@@ -76,6 +76,11 @@ class DocumentVersion(models.Model):
 
 
 class Exemplar(models.Model):
+    KIND_CHOICES = [
+        ("matter_exemplar", "Matter Exemplar"),
+        ("style_anchor", "Style Anchor"),
+        ("section_template", "Section Template"),
+    ]
     OUTCOME_CHOICES = [
         ("approved", "Approved"),
         ("denied", "Denied"),
@@ -87,6 +92,14 @@ class Exemplar(models.Model):
     document_type = models.ForeignKey(
         DocumentType, on_delete=models.SET_NULL, null=True, blank=True
     )
+    kind = models.CharField(
+        max_length=30,
+        choices=KIND_CHOICES,
+        default="matter_exemplar",
+    )
+    style_family = models.CharField(max_length=100, blank=True)
+    is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(default=False)
     case_type = models.CharField(max_length=100, blank=True)
     original_file = models.FileField(upload_to="exemplars/")
     extracted_text = models.TextField(blank=True)

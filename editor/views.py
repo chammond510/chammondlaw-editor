@@ -10,7 +10,8 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .models import Document, DocumentType, DocumentVersion
 from .document_text import extract_plain_text
-from .export import tiptap_to_docx, tiptap_to_pdf
+from .export import tiptap_to_docx_with_style_anchor, tiptap_to_pdf
+from .style_anchor_service import resolve_style_anchor_for_document
 
 
 AUTO_SNAPSHOT_MINUTES = int(os.environ.get("AUTO_SNAPSHOT_MINUTES", "10"))
@@ -111,7 +112,17 @@ def export_docx(request, doc_id):
     if doc.document_type:
         export_format = doc.document_type.export_format
 
-    docx_buffer = tiptap_to_docx(doc.content, doc.title, export_format)
+    style_anchor = resolve_style_anchor_for_document(
+        user=request.user,
+        document=doc,
+        export_format=export_format,
+    )
+    docx_buffer = tiptap_to_docx_with_style_anchor(
+        doc.content,
+        doc.title,
+        export_format,
+        style_anchor=style_anchor,
+    )
 
     filename = doc.title.replace(" ", "_")[:50] + ".docx"
     response = HttpResponse(

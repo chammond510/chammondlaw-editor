@@ -241,7 +241,14 @@ def _build_file_search_tool() -> dict[str, Any] | None:
 def _search_exemplars_for_agent(*, user, query: str, limit: int = 5, document_type_slug: str = ""):
     normalized_query = (query or "").strip()
     normalized_limit = max(1, min(int(limit or 5), 8))
-    qs = Exemplar.objects.filter(created_by=user).select_related("document_type")
+    lowered_query = normalized_query.lower()
+    style_query = any(
+        phrase in lowered_query
+        for phrase in ["style", "format", "structure", "header", "signature", "exhibit", "cover letter"]
+    )
+    qs = Exemplar.objects.filter(created_by=user, is_active=True).select_related("document_type")
+    if not style_query:
+        qs = qs.exclude(kind__in=["style_anchor", "section_template"])
     if document_type_slug:
         qs = qs.filter(document_type__slug=document_type_slug)
 
@@ -249,16 +256,18 @@ def _search_exemplars_for_agent(*, user, query: str, limit: int = 5, document_ty
     for exemplar in qs[:200]:
         text = exemplar.extracted_text or ""
         exemplars.append(
-            {
-                "id": exemplar.id,
-                "title": exemplar.title,
-                "document_type": exemplar.document_type.name if exemplar.document_type else "",
-                "document_type_slug": exemplar.document_type.slug if exemplar.document_type else "",
-                "case_type": exemplar.case_type,
-                "outcome": exemplar.outcome,
-                "tags": exemplar.tags or [],
-                "updated_at": exemplar.updated_at.isoformat(),
-                "snippet": text[:500],
+                {
+                    "id": exemplar.id,
+                    "title": exemplar.title,
+                    "document_type": exemplar.document_type.name if exemplar.document_type else "",
+                    "document_type_slug": exemplar.document_type.slug if exemplar.document_type else "",
+                    "kind": exemplar.kind,
+                    "style_family": exemplar.style_family,
+                    "case_type": exemplar.case_type,
+                    "outcome": exemplar.outcome,
+                    "tags": exemplar.tags or [],
+                    "updated_at": exemplar.updated_at.isoformat(),
+                    "snippet": text[:500],
                 "extracted_text": text[:4000],
                 "embedding": exemplar.embedding or [],
             }
@@ -272,6 +281,8 @@ def _search_exemplars_for_agent(*, user, query: str, limit: int = 5, document_ty
                 "title": item["title"],
                 "document_type": item["document_type"],
                 "document_type_slug": item["document_type_slug"],
+                "kind": item["kind"],
+                "style_family": item["style_family"],
                 "case_type": item["case_type"],
                 "outcome": item["outcome"],
                 "tags": item["tags"],
@@ -284,7 +295,11 @@ def _search_exemplars_for_agent(*, user, query: str, limit: int = 5, document_ty
 
 
 def _get_exemplar_for_agent(*, user, exemplar_id: int):
-    exemplar = Exemplar.objects.filter(created_by=user, id=exemplar_id).select_related("document_type").first()
+    exemplar = Exemplar.objects.filter(
+        created_by=user,
+        id=exemplar_id,
+        is_active=True,
+    ).select_related("document_type").first()
     if not exemplar:
         return {"error": "Exemplar not found."}
 
@@ -293,6 +308,8 @@ def _get_exemplar_for_agent(*, user, exemplar_id: int):
         "title": exemplar.title,
         "document_type": exemplar.document_type.name if exemplar.document_type else "",
         "document_type_slug": exemplar.document_type.slug if exemplar.document_type else "",
+        "kind": exemplar.kind,
+        "style_family": exemplar.style_family,
         "case_type": exemplar.case_type,
         "outcome": exemplar.outcome,
         "tags": exemplar.tags or [],
