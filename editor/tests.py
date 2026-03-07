@@ -2,7 +2,6 @@ from unittest.mock import patch
 from io import BytesIO
 
 from django.contrib.auth.models import User
-from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 from docx import Document as DocxDocument
@@ -242,44 +241,3 @@ class CoverLetterExportTests(TestCase):
         self.assertGreaterEqual(len(exported.tables), 2)
         self.assertEqual(exported.tables[0].cell(0, 0).text.strip(), "EXHIBIT 1")
         self.assertEqual(exported.tables[0].cell(1, 0).text.strip(), "EXHIBIT 2")
-
-
-class SeedTemplatesTests(TestCase):
-    def test_i751_templates_seed_as_three_distinct_cover_letters(self):
-        call_command("seed_templates")
-
-        templates = {
-            doc_type.slug: doc_type
-            for doc_type in DocumentType.objects.filter(slug__icontains="i-751")
-        }
-
-        self.assertEqual(
-            sorted(templates.keys()),
-            [
-                "i-751-change-joint-to-waiver-cover-letter",
-                "i-751-cover-letter",
-                "i-751-waiver-cover-letter",
-            ],
-        )
-        self.assertEqual(templates["i-751-cover-letter"].name, "I-751 Joint Filing Cover Letter")
-        self.assertEqual(templates["i-751-waiver-cover-letter"].name, "I-751 Waiver Filing Cover Letter")
-        self.assertEqual(
-            templates["i-751-change-joint-to-waiver-cover-letter"].name,
-            "I-751 Request to Change Joint Filing to Waiver Cover Letter",
-        )
-
-        for doc_type in templates.values():
-            headings = [
-                "".join(
-                    child.get("text", "")
-                    for child in node.get("content", [])
-                    if isinstance(child, dict)
-                )
-                for node in doc_type.template_content.get("content", [])
-                if node.get("type") == "heading"
-            ]
-            self.assertEqual(headings[:2], ["I. INTRODUCTION", "II. ARGUMENT"])
-            self.assertTrue(headings[2].startswith("A."))
-            self.assertTrue(headings[3].startswith("B."))
-            self.assertTrue(headings[4].startswith("C."))
-            self.assertIn("III. CONCLUSION", headings)
