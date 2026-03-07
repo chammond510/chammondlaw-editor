@@ -67,7 +67,7 @@ You work alongside the attorney inside a live drafting session.
 
 Research operating rules:
 1. Use the BIA Edge database tools first for legal authorities, holdings, statutes, regulations, policy sections, and validity checks.
-2. Use the knowledge-base tools for firm exemplars, prior briefs, and internal language.
+2. Use the knowledge-base tools for firm exemplars, prior briefs, and internal language only when the user is asking about internal style, phrasing, formatting, or prior work product.
 3. Use web search only when freshness matters, when the user explicitly asks for it, or when database tools do not answer the question.
 4. Do not invent citations, case names, statutes, regulations, policy sections, or quoted passages.
 5. Prefer precedential authorities in your legal analysis. If you mention unpublished decisions or non-precedential material, label that clearly.
@@ -598,6 +598,10 @@ class DocumentResearchAgent:
         self.document = document
         self.user = user
         self.client = _new_openai_client()
+        self.has_active_exemplars = Exemplar.objects.filter(
+            created_by=user,
+            is_active=True,
+        ).exists()
 
     def chat(
         self,
@@ -734,16 +738,69 @@ class DocumentResearchAgent:
 
     def _build_tools(self, *, mode: str, include_mcp: bool = True) -> list[dict[str, Any]]:
         allowed_tools = _BIAEDGE_CHAT_TOOLS if mode == "chat" else _BIAEDGE_SUGGEST_TOOLS
-        tools = [
-            _build_web_search_tool(),
-            *_knowledge_function_tools(),
-        ]
+        tools = [_build_web_search_tool()]
+        if self.has_active_exemplars:
+            tools.extend(_knowledge_function_tools())
         if include_mcp:
             tools.insert(0, _build_biaedge_mcp_tool(allowed_tools=allowed_tools))
         file_search = _build_file_search_tool()
         if file_search:
             tools.append(file_search)
         return tools
+
+    def _force_final_response(
+        self,
+        *,
+        instructions: str,
+        current_input: Any,
+        current_previous_id: str | None,
+        response: Any,
+    ) -> dict[str, Any] | None:
+        previous_id = (current_previous_id or getattr(response, "id", "") or "").strip() or None
+        if not previous_id:
+            return None
+
+        if isinstance(current_input, list) and current_input and all(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in current_input
+        ):
+            follow_up_input = list(current_input)
+        else:
+            follow_up_input = []
+
+        follow_up_input.append(
+            {
+                "role": "user",
+                "content": (
+                    "Provide the final answer to the attorney now. "
+                    "Do not call any more tools."
+                ),
+            }
+        )
+
+        follow_up = self._create_response(
+            instructions=(
+                instructions
+                + "\n\nYou have already received the relevant tool outputs for this turn. "
+                + "Provide the final answer now and do not call any more tools."
+            ),
+            input_payload=follow_up_input,
+            tools=[],
+            previous_response_id=previous_id,
+            tool_choice="auto",
+            max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+        )
+
+        answer = _extract_output_text(follow_up)
+        if not answer:
+            return None
+
+        return {
+            "answer": answer,
+            "response_id": getattr(follow_up, "id", "") or "",
+            "tool_calls": _extract_hosted_tool_calls(follow_up),
+            "citations": _extract_citations(follow_up),
+        }
 
     def _has_mcp_tools(self, *, tools: list[dict[str, Any]]) -> bool:
         return any((tool.get("type") or "").strip() == "mcp" for tool in tools)
@@ -969,6 +1026,30 @@ class DocumentResearchAgent:
 
         answer = _extract_output_text(response)
         if not answer:
+            logger.warning(
+                "Document research agent produced no assistant text; attempting finalization.",
+                extra={
+                    "document_id": str(self.document.id),
+                    "user_id": getattr(self.user, "id", None),
+                    "response_id": getattr(response, "id", "") or "",
+                    "output_types": [getattr(item, "type", None) for item in getattr(response, "output", []) or []],
+                },
+            )
+            forced = self._force_final_response(
+                instructions=instructions,
+                current_input=current_input,
+                current_previous_id=current_previous_id,
+                response=response,
+            )
+            if forced:
+                tool_calls.extend(forced["tool_calls"])
+                citations.extend(forced["citations"])
+                return {
+                    "answer": forced["answer"],
+                    "response_id": forced["response_id"],
+                    "tool_calls": tool_calls,
+                    "citations": citations,
+                }
             raise AgentExecutionError("The agent returned an empty response.")
 
         return {

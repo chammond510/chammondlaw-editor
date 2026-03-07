@@ -1,5 +1,6 @@
 from unittest.mock import patch
 from io import BytesIO
+from types import SimpleNamespace
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
@@ -10,6 +11,7 @@ from docx import Document as DocxDocument
 from .agent_service import (
     AgentConfigurationError,
     ChatAgentResult,
+    DocumentResearchAgent,
     SuggestAgentResult,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
@@ -263,6 +265,21 @@ class AgentResearchViewsTests(TestCase):
 
 
 class AgentServiceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="agent_service_user", password="secret")
+        self.document_type = DocumentType.objects.create(
+            name="Agent Service Brief",
+            slug="agent-service-brief",
+            category="brief",
+            template_content=_sample_tiptap("Template"),
+        )
+        self.document = Document.objects.create(
+            title="Agent Service Test Document",
+            document_type=self.document_type,
+            content=_sample_tiptap("The client reported gang extortion to police."),
+            created_by=self.user,
+        )
+
     def test_knowledge_function_tools_use_valid_strict_required_lists(self):
         tools = {
             tool["name"]: tool
@@ -278,6 +295,73 @@ class AgentServiceTests(TestCase):
             sorted(search_schema["properties"].keys()),
             sorted(search_schema["required"]),
         )
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_build_tools_omits_knowledge_functions_without_active_exemplars(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+
+        tools = agent._build_tools(mode="chat", include_mcp=False)
+
+        self.assertFalse(any(tool.get("type") == "function" for tool in tools))
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_run_response_loop_forces_final_answer_after_tool_only_round(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+
+        first_response = SimpleNamespace(
+            id="resp_tool_only",
+            status="completed",
+            output_text="",
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="search_exemplars",
+                    status="completed",
+                    call_id="call_123",
+                    arguments='{"query":"nexus brief","limit":3,"document_type_slug":""}',
+                )
+            ],
+        )
+        final_response = SimpleNamespace(
+            id="resp_final",
+            status="completed",
+            output_text="Matter of C-T-L- supports the nexus rule.",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text="Matter of C-T-L- supports the nexus rule.",
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+        )
+
+        with patch("editor.agent_service._MAX_FUNCTION_ROUNDS", 1):
+            with patch.object(agent, "_create_response", side_effect=[first_response, final_response]) as create_response:
+                result = agent._run_response_loop(
+                    instructions="Test instructions",
+                    input_payload="Test input",
+                    tools=[{"type": "function", "name": "search_exemplars"}],
+                    previous_response_id=None,
+                    initial_tool_choice="auto",
+                )
+
+        self.assertEqual(result["answer"], "Matter of C-T-L- supports the nexus rule.")
+        self.assertEqual(result["response_id"], "resp_final")
+        self.assertEqual(create_response.call_count, 2)
+        forced_request = create_response.call_args_list[1].kwargs
+        self.assertEqual(forced_request["tools"], [])
+        self.assertEqual(forced_request["previous_response_id"], "resp_tool_only")
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
