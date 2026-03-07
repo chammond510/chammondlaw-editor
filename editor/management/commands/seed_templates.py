@@ -159,6 +159,60 @@ def _uscis_cover_letter_template_content(subject, sections, party_lines=None, sa
     return {"type": "doc", "content": content}
 
 
+def _i751_cover_letter_template_content(*, subject, party_lines, introduction, law_paragraph, subheadings, conclusion):
+    content = [
+        _p("[Mailing Method]"),
+        _p(""),
+        _p("[Date]"),
+        _p(""),
+        _p("U.S. Citizenship and Immigration Services"),
+        _p("[Service Center / Lockbox]"),
+        _p("[Address Line 1]"),
+        _p("[Address Line 2]"),
+        _p(""),
+        _mixed_paragraph([
+            ("RE:", [{"type": "bold"}]),
+            ("\t", [{"type": "bold"}]),
+            (subject, [{"type": "bold"}, {"type": "underline"}]),
+        ]),
+    ]
+
+    for label, value in party_lines:
+        content.append(
+            _mixed_paragraph([
+                (f"{label}: ", [{"type": "bold"}]),
+                (value, [{"type": "bold"}]),
+            ])
+        )
+
+    content.extend([
+        _p(""),
+        _p("Dear USCIS Officer:"),
+        _p(""),
+        _h("I. INTRODUCTION", 1),
+        _p(introduction),
+        _p(""),
+        _h("II. ARGUMENT", 1),
+        _p(law_paragraph),
+        _p(""),
+    ])
+
+    for heading, body in subheadings:
+        content.extend([
+            _h(heading, 2),
+            _p(body),
+            _p(""),
+        ])
+
+    content.extend([
+        _h("III. CONCLUSION", 1),
+        _p(conclusion),
+        _p(""),
+        _p("Respectfully submitted,"),
+    ])
+    return {"type": "doc", "content": content}
+
+
 TEMPLATES = [
     {
         "name": "I-130 Cover Letter",
@@ -661,81 +715,80 @@ TEMPLATES = [
         },
     },
     {
-        "name": "I-751 Cover Letter",
+        "name": "I-751 Joint Filing Cover Letter",
         "slug": "i-751-cover-letter",
         "category": "cover_letter",
         "export_format": "cover_letter",
         "icon": "💍",
         "order": 8,
-        "description": "Cover letter for I-751 Petition to Remove Conditions on Residence",
-        "template_content": {
-            "type": "doc",
-            "content": [
-                _p("[Date]"),
-                _p(""),
-                _p("U.S. Citizenship and Immigration Services"),
-                _p("[Service Center Name]"),
-                _p("[Service Center Address]"),
-                _p(""),
-                _mixed_paragraph([
-                    ("RE: ", [{"type": "bold"}]),
-                    ("Form I-751, Petition to Remove Conditions on Residence", []),
-                ]),
-                _mixed_paragraph([
-                    ("Petitioner: ", [{"type": "bold"}]),
-                    ("[Conditional Resident Name]", []),
-                ]),
-                _mixed_paragraph([
-                    ("Joint Petitioner: ", [{"type": "bold"}]),
-                    ("[U.S. Citizen Spouse Name]", []),
-                ]),
-                _mixed_paragraph([
-                    ("A#: ", [{"type": "bold"}]),
-                    ("[A-Number]", []),
-                ]),
-                _p(""),
-                _p("Dear USCIS Officer:"),
-                _p(""),
-                _p("Please find enclosed the Form I-751, Petition to Remove Conditions on Residence, filed jointly by [Conditional Resident Name] and [U.S. Citizen Spouse Name]. The petitioner was granted conditional permanent resident status on [date] and the conditions must be removed pursuant to INA § 216(c), 8 U.S.C. § 1186a(c)."),
-                _p(""),
-                _h("Continued Bona Fide Marriage", 2),
-                _p("The petitioner and the joint petitioner continue to reside together as husband and wife at [address]. They were married on [date] in [location] and their marriage remains bona fide. The following evidence demonstrates the ongoing validity and good faith of the marriage:"),
-                _p(""),
-                _h("Evidence Submitted", 2),
-                _p(""),
-                _h("Joint Financial Documents", 3),
-                _bullet_list([
-                    "[Joint bank account statements covering the two-year conditional period]",
-                    "[Joint tax returns (Form 1040) for [year(s)]]",
-                    "[Joint lease/mortgage showing both names]",
-                ]),
-                _p(""),
-                _h("Joint Residence", 3),
-                _bullet_list([
-                    "[Utility bills in both names or at shared address]",
-                    "[Driver's licenses showing same address]",
-                    "[Mail received at shared address]",
-                ]),
-                _p(""),
-                _h("Shared Life", 3),
-                _bullet_list([
-                    "[Joint insurance policies (health, auto, life)]",
-                    "[Photographs of the couple together over the conditional period]",
-                    "[Birth certificate of child born during marriage, if applicable]",
-                    "[Affidavits from friends and family attesting to the bona fide nature of the marriage]",
-                ]),
-                _p(""),
-                _h("Conclusion", 2),
-                _p("Based on the foregoing, the petitioners have demonstrated that their marriage was entered into in good faith and has continued in good faith throughout the period of conditional residence. We respectfully request that the conditions on residence be removed."),
-                _p(""),
-                _p("Respectfully submitted,"),
-                _p(""),
-                _p(""),
-                _p("Chris Hammond"),
-                _p("Attorney for Petitioner"),
-                _p("Hammond Law, PLLC"),
+        "description": "Cover letter for jointly filed I-751 Petition to Remove Conditions on Residence",
+        "template_content": _i751_cover_letter_template_content(
+            subject="Form I-751, Petition to Remove Conditions on Residence (Joint Filing)",
+            party_lines=[
+                ("Petitioner", "[Conditional Resident Name]"),
+                ("Joint Petitioner", "[U.S. Citizen or LPR Spouse Name]"),
+                ("A#", "[A-Number]"),
             ],
-        },
+            introduction="Please find enclosed the jointly filed Form I-751, Petition to Remove Conditions on Residence, submitted by [Conditional Resident Name] and [U.S. Citizen or LPR Spouse Name]. The conditional resident obtained status through the parties' marriage on [date], and the enclosed petition and supporting evidence establish that the marriage was entered into in good faith and continues to exist.",
+            law_paragraph="Under INA § 216(c)(1)(A), 8 U.S.C. § 1186a(c)(1)(A), and 8 C.F.R. § 216.4(a)(1), USCIS may remove the conditions on residence where the conditional resident and the petitioning spouse jointly file Form I-751 during the statutory filing period and establish that the qualifying marriage was not entered into for the purpose of evading the immigration laws and has not been judicially terminated. The enclosed petition satisfies that standard.",
+            subheadings=[
+                ("A. The Marriage Was Entered Into In Good Faith", "[Describe how the couple met, the course of the relationship, the wedding, and the facts showing the parties intended to build a life together at the time of marriage.]"),
+                ("B. The Marriage Continues To Exist As A Bona Fide Marriage", "[Describe the parties' current marital relationship, shared residence, ongoing family life, and any children, travel, or other facts showing the marriage remains intact.]"),
+                ("C. The Joint Documentary Evidence Establishes Ongoing Marital Life", "[Summarize the core joint evidence submitted, such as joint tax returns, financial accounts, insurance, lease or mortgage records, photographs, affidavits, and other records spanning the conditional-residence period.]"),
+            ],
+            conclusion="For the foregoing reasons, the enclosed Form I-751 and supporting evidence establish eligibility for removal of conditions through joint filing. Petitioner and Joint Petitioner respectfully request approval of the petition and issuance of the ten-year permanent resident card.",
+        ),
+    },
+    {
+        "name": "I-751 Waiver Filing Cover Letter",
+        "slug": "i-751-waiver-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "💍",
+        "order": 9,
+        "description": "Cover letter for I-751 waiver filing under INA § 216(c)(4)",
+        "template_content": _i751_cover_letter_template_content(
+            subject="Form I-751, Petition to Remove Conditions on Residence (Waiver Filing)",
+            party_lines=[
+                ("Petitioner", "[Conditional Resident Name]"),
+                ("Waiver Basis", "[Good faith marriage terminated / battery or extreme cruelty / extreme hardship]"),
+                ("A#", "[A-Number]"),
+            ],
+            introduction="Please find enclosed Form I-751, Petition to Remove Conditions on Residence, filed as a waiver petition by [Conditional Resident Name]. Although the conditional resident cannot proceed by joint filing, the enclosed petition and supporting evidence establish eligibility for the requested waiver and demonstrate that removal of conditions is warranted.",
+            law_paragraph="Under INA § 216(c)(4), 8 U.S.C. § 1186a(c)(4), and 8 C.F.R. § 216.5, USCIS may remove the conditions on residence without a joint petition where the conditional resident establishes eligibility for one of the statutory waiver grounds. In all relevant waiver categories, the record must also show that the qualifying marriage was entered into in good faith. The enclosed filing meets those requirements.",
+            subheadings=[
+                ("A. The Petitioner Entered The Marriage In Good Faith", "[Describe the history of the relationship, the circumstances of the marriage, and the facts showing the marriage was genuine at inception rather than entered for an immigration purpose.]"),
+                ("B. The Petitioner Satisfies The Requested Waiver Ground", "[Set out the facts and evidence supporting the selected waiver basis, including divorce or annulment records, abuse evidence, hardship evidence, or other proof tied directly to the chosen statutory ground.]"),
+                ("C. The Supporting Evidence Independently Warrants Approval Of The Waiver Petition", "[Summarize the documentary record, including declarations, third-party records, corroborating affidavits, and any equities that reinforce why USCIS should approve the petition on the requested waiver basis.]"),
+            ],
+            conclusion="For the foregoing reasons, the petitioner has established both a good-faith marriage and eligibility for the requested waiver under INA § 216(c)(4). Petitioner respectfully requests approval of the enclosed Form I-751 waiver filing and removal of conditions on residence.",
+        ),
+    },
+    {
+        "name": "I-751 Request to Change Joint Filing to Waiver Cover Letter",
+        "slug": "i-751-change-joint-to-waiver-cover-letter",
+        "category": "cover_letter",
+        "export_format": "cover_letter",
+        "icon": "💍",
+        "order": 10,
+        "description": "Cover letter requesting USCIS convert a pending joint I-751 filing to a waiver filing",
+        "template_content": _i751_cover_letter_template_content(
+            subject="Request to Change Pending Joint Form I-751 To Waiver Filing",
+            party_lines=[
+                ("Petitioner", "[Conditional Resident Name]"),
+                ("Receipt Number", "[Receipt Number]"),
+                ("Requested Waiver Basis", "[Good faith marriage terminated / battery or extreme cruelty / extreme hardship]"),
+                ("A#", "[A-Number]"),
+            ],
+            introduction="This letter requests that USCIS treat the petitioner's pending jointly filed Form I-751 as a waiver filing. Since the original joint submission, circumstances have changed such that joint adjudication is no longer available. The enclosed request, updated Form I-751 materials, and supporting evidence establish that the petition should proceed under the requested waiver ground.",
+            law_paragraph="Under INA § 216(c)(4), 8 U.S.C. § 1186a(c)(4), and 8 C.F.R. § 216.5, USCIS may adjudicate Form I-751 on a waiver basis when a conditional resident cannot continue by joint filing but can establish eligibility for one of the statutory waiver grounds. The petitioner must still demonstrate that the marriage was entered into in good faith and that the requested waiver basis is satisfied. The enclosed submission provides that showing and supports conversion of the pending filing to waiver adjudication.",
+            subheadings=[
+                ("A. Joint Filing Is No Longer Viable", "[Explain the change in circumstances since the original joint filing, including divorce, separation, abuse, non-cooperation, or other facts that make continued joint adjudication impossible or inappropriate.]"),
+                ("B. The Petitioner Qualifies For The Requested Waiver Basis", "[Set out the facts and supporting evidence that satisfy the selected waiver category and explain why USCIS should adjudicate the pending petition on that basis.]"),
+                ("C. The Record Continues To Establish A Good-Faith Marriage", "[Summarize the evidence showing the parties entered the marriage in good faith, including relationship history and documentary evidence from the marriage and conditional-residence period.]"),
+            ],
+            conclusion="For the foregoing reasons, petitioner respectfully requests that USCIS convert the pending joint Form I-751 to a waiver filing, accept the enclosed supporting materials, and approve the petition under the requested waiver ground.",
+        ),
     },
 ]
 
@@ -887,7 +940,7 @@ ADDITIONAL_TEMPLATE_DEFS = [
 ]
 
 
-for idx, template in enumerate(ADDITIONAL_TEMPLATE_DEFS, start=9):
+for idx, template in enumerate(ADDITIONAL_TEMPLATE_DEFS, start=11):
     if template["category"] == "cover_letter":
         template_content = _uscis_cover_letter_template_content(
             template["name"],
