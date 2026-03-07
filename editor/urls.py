@@ -1,6 +1,6 @@
 from django.urls import path
 from django.contrib.auth import views as auth_views
-from . import views, research_views, exemplar_views
+from . import agent_views, views, research_views, exemplar_views
 
 urlpatterns = [
     # Auth
@@ -41,6 +41,10 @@ urlpatterns = [
     # Research API
     path("api/research/suggest/", research_views.suggest_case_law, name="research_suggest"),
     path("api/research/ask/", research_views.ask_question, name="research_ask"),
+    path("api/research/agent/session/<uuid:doc_id>/", agent_views.agent_session, name="research_agent_session"),
+    path("api/research/agent/chat/<uuid:doc_id>/", agent_views.agent_chat, name="research_agent_chat"),
+    path("api/research/agent/reset/<uuid:doc_id>/", agent_views.agent_reset, name="research_agent_reset"),
+    path("api/research/agent/suggest/<uuid:doc_id>/", agent_views.agent_suggest, name="research_agent_suggest"),
     path("api/research/categories/", research_views.list_categories, name="research_categories"),
     path("api/research/category/<slug:slug>/", research_views.category_cases_by_slug, name="research_category_slug"),
     path("api/research/category/<int:category_id>/", research_views.category_cases, name="research_category"),

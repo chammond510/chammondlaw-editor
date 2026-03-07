@@ -106,3 +106,51 @@ class Exemplar(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class DocumentResearchSession(models.Model):
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="research_sessions"
+    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    last_response_id = models.CharField(max_length=200, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "user"],
+                name="editor_unique_document_research_session",
+            )
+        ]
+
+    def __str__(self):
+        return f"Research session for {self.document} ({self.user})"
+
+
+class DocumentResearchMessage(models.Model):
+    ROLE_CHOICES = [
+        ("user", "User"),
+        ("assistant", "Assistant"),
+    ]
+
+    session = models.ForeignKey(
+        DocumentResearchSession, on_delete=models.CASCADE, related_name="messages"
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    content = models.TextField()
+    selection_text = models.TextField(blank=True)
+    response_id = models.CharField(max_length=200, blank=True, default="")
+    tool_calls = models.JSONField(default=list, blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.session.document} {self.role} message @ {self.created_at.isoformat()}"

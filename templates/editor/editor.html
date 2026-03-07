@@ -79,7 +79,7 @@
     <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
     <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
     <div class="flex-grow"></div>
-    <button id="research-toggle" class="bg-navy text-white px-3 py-1.5 rounded text-xs hover:bg-opacity-90">🔍 Research</button>
+    <button id="research-toggle" class="bg-navy text-white px-3 py-1.5 rounded text-xs hover:bg-opacity-90">Research Agent</button>
 </div>
 
 <div id="editor-shell" class="flex h-[calc(100vh-110px)] overflow-hidden">
@@ -93,26 +93,49 @@
 
     <aside id="research-sidebar" class="bg-white border-l border-gray-200 h-full overflow-y-auto shrink-0">
         <div class="p-4 border-b border-gray-100 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-navy">Research & Exemplars</h3>
+            <h3 class="text-sm font-semibold text-navy">Research Agent</h3>
             <button id="research-close" class="text-gray-400 hover:text-gray-700">✕</button>
         </div>
         <div class="p-3 border-b border-gray-100 flex gap-2">
-            <button id="tab-search" class="tab-btn tab-btn-active px-3 py-1 text-xs rounded">Search</button>
-            <button id="tab-categories" class="tab-btn px-3 py-1 text-xs rounded border">Categories</button>
+            <button id="tab-chat" class="tab-btn tab-btn-active px-3 py-1 text-xs rounded">Chat</button>
+            <button id="tab-suggest" class="tab-btn px-3 py-1 text-xs rounded border">Suggest</button>
             <button id="tab-exemplars" class="tab-btn px-3 py-1 text-xs rounded border">Exemplars</button>
         </div>
 
-        <div id="search-panel" class="p-3 space-y-2">
-            <input id="research-query" class="w-full border rounded px-2 py-1 text-sm" placeholder="Search case law or ask a legal question..." />
-            <div class="grid grid-cols-3 gap-2">
-                <button id="run-search" class="px-2 py-1 text-xs bg-gold text-navy rounded">Search</button>
-                <button id="run-suggest" class="px-2 py-1 text-xs border rounded">Suggest Selection</button>
-                <button id="run-ask" class="px-2 py-1 text-xs border rounded">Ask</button>
+        <div id="chat-panel" class="p-3 space-y-3">
+            <div id="agent-chat-status" class="text-xs text-gray-500">
+                The agent reads the current draft and will include the current selection when available.
             </div>
-            <p class="text-xs text-gray-500">Slash command available in editor: <code>/research</code></p>
+            <div id="agent-chat-messages" class="space-y-3 max-h-[42vh] overflow-y-auto pr-1"></div>
+            <div class="space-y-2">
+                <textarea id="agent-chat-input" rows="4" class="w-full border rounded px-2 py-2 text-sm" placeholder="Ask about the argument, controlling law, weak spots, or tell the agent to search the database..."></textarea>
+                <div class="flex items-center justify-between gap-2">
+                    <div id="agent-chat-selection-hint" class="text-[11px] text-gray-500">
+                        Current selection will be included when available.
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="agent-reset" class="px-2 py-1 text-xs border rounded">Clear Thread</button>
+                        <button id="agent-send" class="px-3 py-1 text-xs bg-gold text-navy rounded">Send</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
-        <div id="categories-panel" class="p-3 hidden"></div>
+        <div id="suggest-panel" class="p-3 hidden space-y-3">
+            <div class="border rounded p-2 bg-gray-50">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="text-xs font-semibold text-gray-700">Selected text</div>
+                    <button id="refresh-suggest-selection" class="px-2 py-1 text-xs border rounded">Use Current Selection</button>
+                </div>
+                <div id="suggest-selection-preview" class="mt-2 text-xs text-gray-700 whitespace-pre-wrap">
+                    Select text in the editor to focus the suggestion.
+                </div>
+            </div>
+            <textarea id="suggest-focus-note" rows="3" class="w-full border rounded px-2 py-2 text-sm" placeholder="Optional focus note, e.g. find the best nexus / PSG / corroboration authority for this paragraph."></textarea>
+            <button id="run-agent-suggest" class="w-full px-3 py-2 text-xs bg-navy text-white rounded">Suggest Authorities</button>
+            <div id="agent-suggest-summary" class="hidden text-xs text-gray-600"></div>
+            <div id="agent-suggest-results" class="space-y-2"></div>
+        </div>
 
         <div id="exemplar-panel" class="p-3 hidden space-y-3">
             <div>
@@ -149,7 +172,6 @@
             </form>
         </div>
 
-        <div id="results" class="p-3 space-y-2"></div>
         <div id="exemplar-results" class="p-3 space-y-2 hidden"></div>
 
         <div id="case-panel" class="hidden absolute right-0 top-0 w-[420px] h-full bg-white border-l border-gray-200 overflow-y-auto z-20">
@@ -415,6 +437,7 @@ editor.on('selectionUpdate', () => {
   }
   updateToolbar();
   maybeOpenSlashMenu();
+  refreshResearchSelectionDisplays();
 });
 
 document.getElementById('doc-title').addEventListener('input', (() => {
@@ -472,7 +495,17 @@ function updateToolbar() {
   });
 }
 
-function openSidebar() { editorShell.classList.add('research-open'); }
+let agentSessionLoaded = false;
+let agentMessages = [];
+let agentBusy = false;
+
+function openSidebar() {
+  editorShell.classList.add('research-open');
+  refreshResearchSelectionDisplays();
+  if (!agentSessionLoaded) {
+    loadAgentSession();
+  }
+}
 function closeSidebar() {
   editorShell.classList.remove('research-open');
   document.getElementById('case-panel').classList.add('hidden');
@@ -488,43 +521,7 @@ function validityBadge(status) {
   return '<span class="text-gray-500">⬜ unknown</span>';
 }
 
-function caseCard(item) {
-  const holding = item.holding || item.summary || '';
-  const escaped = JSON.stringify(item).replace(/'/g, '&#39;');
-  return `<div class="border rounded p-2 hover:border-navy bg-white">
-    <button class="case-open text-left w-full text-sm font-semibold text-navy" data-id="${item.document_id}">${item.case_name || 'Unknown case'}</button>
-    <div class="text-xs text-gray-600">${item.citation || ''}</div>
-    <div class="text-xs">${validityBadge(item.validity_status)}</div>
-    <div class="text-xs text-gray-700 mt-1">${holding.slice(0, 220)}</div>
-    <div class="mt-2 flex gap-2">
-      <button class="insert-citation text-xs bg-gold text-navy px-2 py-1 rounded" data-case='${escaped}'>Insert Citation</button>
-      <button class="similar text-xs border px-2 py-1 rounded" data-id="${item.document_id}">Find Similar</button>
-    </div>
-  </div>`;
-}
-
-function renderResults(items) {
-  const node = document.getElementById('results');
-  node.classList.remove('hidden');
-  document.getElementById('exemplar-results').classList.add('hidden');
-  node.innerHTML = items.length ? items.map(caseCard).join('') : '<div class="text-xs text-gray-500">No results.</div>';
-  node.querySelectorAll('.insert-citation').forEach(btn => btn.addEventListener('click', () => insertCitation(JSON.parse(btn.dataset.case))));
-  node.querySelectorAll('.case-open').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
-  node.querySelectorAll('.similar').forEach(btn => btn.addEventListener('click', async () => {
-    const res = await fetch(`/api/research/similar/${btn.dataset.id}/`);
-    const data = await res.json();
-    renderResults(data.results || []);
-  }));
-}
-
-function renderResearchError(message) {
-  const node = document.getElementById('results');
-  node.classList.remove('hidden');
-  document.getElementById('exemplar-results').classList.add('hidden');
-  node.innerHTML = `<div class="text-xs text-red-700 border border-red-200 bg-red-50 rounded p-2">${message || 'Research request failed.'}</div>`;
-}
-
-function getSuggestSelectionInput() {
+function getCurrentResearchSelection() {
   const selected = editor.state.doc.textBetween(
     editor.state.selection.from,
     editor.state.selection.to,
@@ -533,80 +530,6 @@ function getSuggestSelectionInput() {
   if (selected) return selected;
   if (lastSelectedResearchText) return lastSelectedResearchText;
   return (editor.getText() || '').trim().slice(0, 1200);
-}
-
-function renderAskAnswer(payload) {
-  const answer = payload.answer || 'No answer returned.';
-  const citations = payload.citations || [];
-  const node = document.getElementById('results');
-  document.getElementById('exemplar-results').classList.add('hidden');
-  node.classList.remove('hidden');
-  node.innerHTML = `
-    <div class="border rounded p-3 bg-white">
-      <h4 class="text-sm font-semibold text-navy mb-2">Answer</h4>
-      <pre class="whitespace-pre-wrap text-xs text-gray-800">${answer}</pre>
-    </div>
-    <div class="border rounded p-3 bg-white">
-      <h4 class="text-sm font-semibold text-navy mb-2">Citations</h4>
-      <div class="space-y-2">
-        ${citations.map((c, idx) => `
-          <div class="text-xs border rounded p-2">
-            <div class="font-semibold">[${idx + 1}] ${c.case_name || 'Unknown case'}</div>
-            <div class="text-gray-600">${c.citation || ''}</div>
-            <div class="mt-1 flex gap-2">
-              <button class="ask-open-case border rounded px-2 py-0.5" data-id="${c.document_id}">Open Case</button>
-              <button class="ask-insert-case border rounded px-2 py-0.5" data-case='${JSON.stringify(c).replace(/'/g, '&#39;')}'>Insert Citation</button>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    </div>`;
-
-  node.querySelectorAll('.ask-open-case').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
-  node.querySelectorAll('.ask-insert-case').forEach(btn => btn.addEventListener('click', () => insertCitation(JSON.parse(btn.dataset.case))));
-}
-
-async function runSuggest(text) {
-  const queryText = (text || '').trim();
-  if (!queryText) {
-    renderResearchError('Select text in the editor first, or enter a search query.');
-    return;
-  }
-  try {
-    const res = await fetch('/api/research/suggest/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-      body: JSON.stringify({ text: queryText }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      renderResearchError(data.error || 'Unable to suggest case law right now.');
-      return;
-    }
-    renderResults(data.results || []);
-  } catch {
-    renderResearchError('Network error while suggesting case law.');
-  }
-}
-
-async function runAsk(question) {
-  const res = await fetch('/api/research/ask/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-    body: JSON.stringify({ question }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    renderAskAnswer({ answer: data.error || 'Unable to answer this question.', citations: [] });
-    return;
-  }
-  renderAskAnswer(data);
-}
-
-async function runCategory(slug) {
-  const res = await fetch(`/api/research/category/${encodeURIComponent(slug)}/`);
-  const data = await res.json();
-  renderResults(data.results || []);
 }
 
 function insertCitation(item) {
@@ -641,42 +564,295 @@ async function openCase(docId) {
 
 document.getElementById('case-back').addEventListener('click', () => document.getElementById('case-panel').classList.add('hidden'));
 
+function toolSourceSummary(toolCalls = []) {
+  const labels = [];
+  toolCalls.forEach(call => {
+    if (call.source === 'biaedge' && !labels.includes('BIA Edge')) labels.push('BIA Edge');
+    if (call.source === 'web' && !labels.includes('web search')) labels.push('web search');
+    if (call.source === 'knowledge' && !labels.includes('knowledge base')) labels.push('knowledge base');
+  });
+  return labels.length ? `Used: ${labels.join(', ')}` : '';
+}
+
+function citationChips(citations = []) {
+  return citations.map(citation => {
+    if (citation.type === 'web' && citation.url) {
+      const title = escapeHtml(citation.title || citation.url);
+      return `<a href="${citation.url}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] text-gray-600 hover:border-navy hover:text-navy">${title}</a>`;
+    }
+    if (citation.type === 'file') {
+      return `<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] text-gray-600">${escapeHtml(citation.filename || 'Knowledge file')}</span>`;
+    }
+    return '';
+  }).join('');
+}
+
+function renderAgentMessages() {
+  const node = document.getElementById('agent-chat-messages');
+  if (!agentMessages.length) {
+    node.innerHTML = `
+      <div class="border rounded-lg p-3 bg-gray-50 text-sm text-gray-700">
+        <div class="font-semibold text-navy">Document Agent</div>
+        <div class="mt-2 text-xs text-gray-600">Try asking:</div>
+        <div class="mt-2 space-y-1 text-xs text-gray-700">
+          <div>What precedential authority should support this argument?</div>
+          <div>Search BIA Edge for stronger nexus cases for the selected paragraph.</div>
+          <div>What is missing from this draft before I file it?</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  node.innerHTML = agentMessages.map(message => {
+    const isAssistant = message.role === 'assistant';
+    const tools = isAssistant ? toolSourceSummary(message.tool_calls || []) : '';
+    const citations = isAssistant ? citationChips(message.citations || []) : '';
+    const selectionNote = !isAssistant && message.selection_text
+      ? `<div class="mt-2 text-[11px] ${isAssistant ? 'text-gray-500' : 'text-blue-100'}">Selected text: ${escapeHtml((message.selection_text || '').slice(0, 220))}</div>`
+      : '';
+
+    return `
+      <div class="rounded-lg p-3 ${isAssistant ? 'border bg-white text-gray-800' : 'bg-navy text-white'}">
+        <div class="text-[11px] ${isAssistant ? 'text-gray-500' : 'text-blue-100'}">${isAssistant ? 'Agent' : 'You'}</div>
+        <div class="mt-1 whitespace-pre-wrap text-sm">${escapeHtml(message.content || '')}</div>
+        ${selectionNote}
+        ${tools ? `<div class="mt-2 text-[11px] text-gray-500">${tools}</div>` : ''}
+        ${citations ? `<div class="mt-2 flex flex-wrap gap-2">${citations}</div>` : ''}
+      </div>`;
+  }).join('');
+  node.scrollTop = node.scrollHeight;
+}
+
+async function loadAgentSession() {
+  try {
+    const res = await fetch(`/api/research/agent/session/${docId}/`);
+    const data = await res.json();
+    if (!res.ok) {
+      document.getElementById('agent-chat-status').textContent = data.error || 'Unable to load the agent session.';
+      return;
+    }
+    agentMessages = data.messages || [];
+    agentSessionLoaded = true;
+    renderAgentMessages();
+  } catch {
+    document.getElementById('agent-chat-status').textContent = 'Unable to load the agent session.';
+  }
+}
+
+function setAgentBusy(isBusy, statusText = '') {
+  agentBusy = isBusy;
+  const sendButton = document.getElementById('agent-send');
+  const resetButton = document.getElementById('agent-reset');
+  sendButton.disabled = isBusy;
+  resetButton.disabled = isBusy;
+  sendButton.classList.toggle('opacity-60', isBusy);
+  sendButton.textContent = isBusy ? 'Working...' : 'Send';
+  document.getElementById('agent-chat-status').textContent = statusText || 'The agent reads the current draft and will include the current selection when available.';
+}
+
+async function sendAgentMessage() {
+  if (agentBusy) return;
+  const input = document.getElementById('agent-chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+
+  setAgentBusy(true, 'Working in the document context...');
+  try {
+    const res = await fetch(`/api/research/agent/chat/${docId}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({
+        message,
+        selected_text: getCurrentResearchSelection(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAgentBusy(false, data.error || 'The agent could not answer right now.');
+      return;
+    }
+
+    agentMessages.push(data.user_message, data.assistant_message);
+    renderAgentMessages();
+    input.value = '';
+    setAgentBusy(false, '');
+  } catch {
+    setAgentBusy(false, 'Network error while talking to the agent.');
+  }
+}
+
+async function resetAgentSession() {
+  if (agentBusy) return;
+  if (!window.confirm('Clear the chat thread for this document?')) return;
+
+  try {
+    const res = await fetch(`/api/research/agent/reset/${docId}/`, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrfToken },
+    });
+    if (!res.ok) {
+      document.getElementById('agent-chat-status').textContent = 'Unable to clear the chat thread.';
+      return;
+    }
+    agentMessages = [];
+    agentSessionLoaded = true;
+    renderAgentMessages();
+    document.getElementById('agent-chat-status').textContent = 'Chat thread cleared.';
+  } catch {
+    document.getElementById('agent-chat-status').textContent = 'Unable to clear the chat thread.';
+  }
+}
+
+function refreshResearchSelectionDisplays() {
+  const selection = getCurrentResearchSelection();
+  document.getElementById('suggest-selection-preview').textContent = selection || 'Select text in the editor to focus the suggestion.';
+  document.getElementById('agent-chat-selection-hint').textContent = selection
+    ? `Including current selection (${Math.min(selection.length, 220)} chars) when you send.`
+    : 'Current selection will be included when available.';
+}
+
+function authorityBadges(item) {
+  const badges = [];
+  if (item.precedential_status && item.precedential_status !== 'n/a') {
+    badges.push(`<span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">${escapeHtml(item.precedential_status)}</span>`);
+  }
+  if (item.validity_status && item.validity_status !== 'n/a') {
+    badges.push(`<span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">${escapeHtml(item.validity_status)}</span>`);
+  }
+  if (item.kind) {
+    badges.push(`<span class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">${escapeHtml(item.kind)}</span>`);
+  }
+  return badges.join('');
+}
+
+function insertAuthority(item) {
+  if ((item.kind || '').toLowerCase() === 'case') {
+    insertCitation({
+      case_name: item.title,
+      citation: item.citation,
+      document_id: item.document_id,
+    });
+    return;
+  }
+
+  const text = item.citation
+    ? (item.title && item.title !== item.citation ? `${item.title}, ${item.citation}` : item.citation)
+    : item.title;
+  if (text) {
+    editor.chain().focus().insertContent(text).run();
+  }
+}
+
+function authorityCard(item) {
+  const escaped = JSON.stringify(item).replace(/'/g, '&#39;');
+  return `<div class="border rounded p-3 bg-white hover:border-navy">
+    <div class="flex items-start justify-between gap-2">
+      <div>
+        <div class="text-sm font-semibold text-navy">${escapeHtml(item.title || 'Authority')}</div>
+        <div class="text-xs text-gray-600 mt-1">${escapeHtml(item.citation || '')}</div>
+      </div>
+      <div class="flex flex-wrap gap-1 justify-end">${authorityBadges(item)}</div>
+    </div>
+    <div class="mt-2 text-xs text-gray-700"><span class="font-semibold">Why it matters:</span> ${escapeHtml(item.relevance || '')}</div>
+    <div class="mt-2 text-xs text-gray-700"><span class="font-semibold">Suggested use:</span> ${escapeHtml(item.suggested_use || '')}</div>
+    <div class="mt-2 text-xs text-gray-600">${escapeHtml(item.pinpoint || '')}</div>
+    <div class="mt-3 flex gap-2">
+      <button class="insert-authority px-2 py-1 text-xs bg-gold text-navy rounded" data-authority='${escaped}'>Insert</button>
+      ${item.document_id ? `<button class="open-authority-case px-2 py-1 text-xs border rounded" data-id="${item.document_id}">Open Case</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function renderSuggestError(message) {
+  document.getElementById('agent-suggest-summary').classList.add('hidden');
+  document.getElementById('agent-suggest-results').innerHTML = `<div class="text-xs text-red-700 border border-red-200 bg-red-50 rounded p-2">${escapeHtml(message || 'Unable to suggest authorities right now.')}</div>`;
+}
+
+function renderSuggestResponse(payload) {
+  const summary = document.getElementById('agent-suggest-summary');
+  const nextQuestions = (payload.next_questions || []).filter(Boolean);
+  summary.classList.remove('hidden');
+  summary.innerHTML = `
+    <div><span class="font-semibold text-gray-700">Issue:</span> ${escapeHtml(payload.selection_summary || '')}</div>
+    <div class="mt-1"><span class="font-semibold text-gray-700">Draft gap:</span> ${escapeHtml(payload.draft_gap || '')}</div>
+    ${payload.search_notes ? `<div class="mt-1">${escapeHtml(payload.search_notes)}</div>` : ''}
+    ${nextQuestions.length ? `<div class="mt-1"><span class="font-semibold text-gray-700">Next questions:</span> ${nextQuestions.map(q => escapeHtml(q)).join(' | ')}</div>` : ''}
+  `;
+
+  const results = document.getElementById('agent-suggest-results');
+  const authorities = payload.authorities || [];
+  results.innerHTML = authorities.length
+    ? authorities.map(authorityCard).join('')
+    : '<div class="text-xs text-gray-500 border rounded p-2 bg-gray-50">No strong authorities were returned for this passage.</div>';
+
+  results.querySelectorAll('.insert-authority').forEach(btn => btn.addEventListener('click', () => insertAuthority(JSON.parse(btn.dataset.authority))));
+  results.querySelectorAll('.open-authority-case').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
+}
+
+async function runAgentSuggest() {
+  const selectedText = getCurrentResearchSelection();
+  if (!selectedText) {
+    renderSuggestError('Select text in the editor first so the agent knows what passage to support.');
+    return;
+  }
+
+  document.getElementById('agent-suggest-summary').classList.add('hidden');
+  document.getElementById('agent-suggest-results').innerHTML = '<div class="text-xs text-gray-500">Researching the selected passage...</div>';
+
+  try {
+    const res = await fetch(`/api/research/agent/suggest/${docId}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({
+        selected_text: selectedText,
+        focus_note: document.getElementById('suggest-focus-note').value.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      renderSuggestError(data.error || 'Unable to suggest authorities right now.');
+      return;
+    }
+    renderSuggestResponse(data);
+  } catch {
+    renderSuggestError('Network error while suggesting authorities.');
+  }
+}
+
 function setTab(tabName) {
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.remove('tab-btn-active');
     btn.classList.add('border');
   });
 
-  const searchPanel = document.getElementById('search-panel');
-  const categoriesPanel = document.getElementById('categories-panel');
+  const chatPanel = document.getElementById('chat-panel');
+  const suggestPanel = document.getElementById('suggest-panel');
   const exemplarPanel = document.getElementById('exemplar-panel');
-  const researchResults = document.getElementById('results');
   const exemplarResults = document.getElementById('exemplar-results');
 
-  searchPanel.classList.add('hidden');
-  categoriesPanel.classList.add('hidden');
+  chatPanel.classList.add('hidden');
+  suggestPanel.classList.add('hidden');
   exemplarPanel.classList.add('hidden');
+  exemplarResults.classList.add('hidden');
 
-  if (tabName === 'search') {
-    document.getElementById('tab-search').classList.add('tab-btn-active');
-    document.getElementById('tab-search').classList.remove('border');
-    searchPanel.classList.remove('hidden');
-    researchResults.classList.remove('hidden');
-    exemplarResults.classList.add('hidden');
+  if (tabName === 'chat') {
+    document.getElementById('tab-chat').classList.add('tab-btn-active');
+    document.getElementById('tab-chat').classList.remove('border');
+    chatPanel.classList.remove('hidden');
+    if (!agentSessionLoaded) {
+      loadAgentSession();
+    }
   }
-  if (tabName === 'categories') {
-    document.getElementById('tab-categories').classList.add('tab-btn-active');
-    document.getElementById('tab-categories').classList.remove('border');
-    categoriesPanel.classList.remove('hidden');
-    researchResults.classList.remove('hidden');
-    exemplarResults.classList.add('hidden');
-    loadCategories();
+  if (tabName === 'suggest') {
+    document.getElementById('tab-suggest').classList.add('tab-btn-active');
+    document.getElementById('tab-suggest').classList.remove('border');
+    suggestPanel.classList.remove('hidden');
+    refreshResearchSelectionDisplays();
   }
   if (tabName === 'exemplars') {
     document.getElementById('tab-exemplars').classList.add('tab-btn-active');
     document.getElementById('tab-exemplars').classList.remove('border');
     exemplarPanel.classList.remove('hidden');
-    researchResults.classList.add('hidden');
     exemplarResults.classList.remove('hidden');
     if (!document.getElementById('exemplar-results').dataset.loaded) {
       suggestExemplarsForDocument();
@@ -684,35 +860,20 @@ function setTab(tabName) {
   }
 }
 
-async function loadCategories() {
-  const res = await fetch('/api/research/categories/');
-  const data = await res.json();
-  document.getElementById('categories-panel').innerHTML = (data.categories || []).map(c => `
-    <button class="cat-btn w-full text-left text-sm p-2 border-b hover:bg-gray-50" data-slug="${c.slug}">
-      <div class="font-medium">${c.name}</div>
-      <div class="text-xs text-gray-500">${c.description || ''}</div>
-    </button>
-  `).join('');
-  document.querySelectorAll('.cat-btn').forEach(btn => btn.addEventListener('click', () => runCategory(btn.dataset.slug)));
-}
-
-document.getElementById('run-search').addEventListener('click', () => runSuggest(document.getElementById('research-query').value));
-document.getElementById('run-suggest').addEventListener('mousedown', (e) => {
-  // Preserve current editor selection when clicking the button.
-  e.preventDefault();
-});
-document.getElementById('run-suggest').addEventListener('click', () => {
-  runSuggest(getSuggestSelectionInput());
-});
-document.getElementById('run-ask').addEventListener('click', () => {
-  const question = document.getElementById('research-query').value.trim();
-  if (!question) return;
-  runAsk(question);
-});
-
-document.getElementById('tab-search').addEventListener('click', () => setTab('search'));
-document.getElementById('tab-categories').addEventListener('click', () => setTab('categories'));
+document.getElementById('agent-send').addEventListener('click', sendAgentMessage);
+document.getElementById('agent-reset').addEventListener('click', resetAgentSession);
+document.getElementById('tab-chat').addEventListener('click', () => setTab('chat'));
+document.getElementById('tab-suggest').addEventListener('click', () => setTab('suggest'));
 document.getElementById('tab-exemplars').addEventListener('click', () => setTab('exemplars'));
+document.getElementById('refresh-suggest-selection').addEventListener('click', refreshResearchSelectionDisplays);
+document.getElementById('run-agent-suggest').addEventListener('click', runAgentSuggest);
+document.getElementById('agent-chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendAgentMessage();
+  }
+});
+refreshResearchSelectionDisplays();
 
 function exemplarCard(item) {
   return `<div class="border rounded p-2 bg-white hover:border-navy">
@@ -1249,12 +1410,12 @@ editor.view.dom.addEventListener('click', (e) => {
 const slashCommands = [
   {
     id: 'research',
-    title: 'Open Research Sidebar',
-    description: 'Search, suggest case law, and ask legal questions',
-    keywords: ['research', 'case', 'law', 'suggest'],
+    title: 'Open Research Agent',
+    description: 'Chat with the agent or suggest authorities for the selected text',
+    keywords: ['research', 'case', 'law', 'suggest', 'agent', 'chat'],
     run: () => {
       openSidebar();
-      setTab('search');
+      setTab('chat');
     },
   },
   {
