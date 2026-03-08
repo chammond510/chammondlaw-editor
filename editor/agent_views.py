@@ -50,6 +50,28 @@ def _serialize_run(run, *, include_result=False):
     return payload
 
 
+def _fallback_chat_message_from_run(run):
+    if run.mode != "chat" or run.status != "completed":
+        return None
+
+    result = run.result_payload or {}
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        return None
+
+    return {
+        "id": f"run-{run.public_id}",
+        "role": "assistant",
+        "content": answer,
+        "selection_text": run.user_message.selection_text if run.user_message else "",
+        "response_id": str(result.get("response_id") or run.response_id or "").strip(),
+        "tool_calls": result.get("tool_calls") or [],
+        "citations": result.get("citations") or [],
+        "metadata": result.get("metadata") or {},
+        "created_at": (run.completed_at or run.updated_at or timezone.now()).isoformat(),
+    }
+
+
 def _get_session_for_document(*, user, document):
     session, _ = DocumentResearchSession.objects.get_or_create(
         document=document,
@@ -111,6 +133,15 @@ def _persist_chat_completion(run):
     session.last_response_id = str(result.get("response_id") or "").strip()
     session.save(update_fields=["last_response_id", "updated_at"])
     return assistant_message
+
+
+def _mark_assistant_persist_failure(run, exc):
+    metadata = dict(run.metadata or {})
+    metadata["assistant_persist_failed"] = True
+    metadata["assistant_persist_error"] = str(exc)[:500]
+    run.metadata = metadata
+    run.save(update_fields=["metadata", "updated_at"])
+    return run
 
 
 @login_required
@@ -319,40 +350,78 @@ def agent_run_status(request, run_id):
         session__document__created_by=request.user,
     )
 
-    if run.status in _ACTIVE_RUN_STATUSES:
-        try:
-            agent = DocumentResearchAgent(document=run.session.document, user=request.user)
-            run = agent.advance_run(run=run)
-        except AgentConfigurationError as exc:
-            run = _mark_run_start_failure(run, str(exc))
-        except Exception:
-            logger.exception(
-                "Unexpected document agent polling failure",
-                extra={
-                    "document_id": str(run.session.document.id),
-                    "user_id": request.user.id,
-                    "run_id": str(run.public_id),
-                },
-            )
-            run = _mark_run_start_failure(run, "The agent failed unexpectedly while polling.")
+    try:
+        if run.status in _ACTIVE_RUN_STATUSES:
+            try:
+                agent = DocumentResearchAgent(document=run.session.document, user=request.user)
+                run = agent.advance_run(run=run)
+            except AgentConfigurationError as exc:
+                run = _mark_run_start_failure(run, str(exc))
+            except Exception:
+                logger.exception(
+                    "Unexpected document agent polling failure",
+                    extra={
+                        "document_id": str(run.session.document.id),
+                        "user_id": request.user.id,
+                        "run_id": str(run.public_id),
+                    },
+                )
+                run = _mark_run_start_failure(run, "The agent failed unexpectedly while polling.")
 
-    assistant_message = None
-    if run.mode == "chat" and run.status == "completed":
-        with transaction.atomic():
-            locked_run = DocumentResearchRun.objects.select_for_update().select_related(
-                "session",
-                "assistant_message",
-                "user_message",
-            ).get(id=run.id)
-            assistant_message = _persist_chat_completion(locked_run)
-            run = locked_run
+        assistant_message = None
+        fallback_assistant_message = _fallback_chat_message_from_run(run)
+        if run.mode == "chat" and run.status == "completed":
+            if run.assistant_message_id:
+                assistant_message = run.assistant_message
+            elif not (run.metadata or {}).get("assistant_persist_failed"):
+                try:
+                    with transaction.atomic():
+                        locked_run = DocumentResearchRun.objects.select_for_update().select_related(
+                            "session",
+                            "assistant_message",
+                            "user_message",
+                        ).get(id=run.id)
+                        assistant_message = _persist_chat_completion(locked_run)
+                        run = locked_run
+                except Exception as exc:
+                    logger.exception(
+                        "Unable to persist completed document agent chat message",
+                        extra={
+                            "document_id": str(run.session.document.id),
+                            "user_id": request.user.id,
+                            "run_id": str(run.public_id),
+                        },
+                    )
+                    run = _mark_assistant_persist_failure(run, exc)
 
-    return JsonResponse(
-        {
-            "run": _serialize_run(run, include_result=run.mode == "suggest"),
-            "assistant_message": _serialize_message(assistant_message) if assistant_message else (
-                _serialize_message(run.assistant_message) if run.assistant_message_id else None
-            ),
-            "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
-        }
-    )
+        return JsonResponse(
+            {
+                "run": _serialize_run(run, include_result=run.mode == "suggest"),
+                "assistant_message": (
+                    _serialize_message(assistant_message)
+                    if assistant_message
+                    else (_serialize_message(run.assistant_message) if run.assistant_message_id else fallback_assistant_message)
+                ),
+                "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
+            }
+        )
+    except Exception:
+        logger.exception(
+            "Unexpected document agent run status failure",
+            extra={
+                "document_id": str(run.session.document.id),
+                "user_id": request.user.id,
+                "run_id": str(run.public_id),
+            },
+        )
+        fallback_assistant_message = _fallback_chat_message_from_run(run)
+        status = 200 if fallback_assistant_message else 500
+        return JsonResponse(
+            {
+                "error": "The agent run status could not be fully loaded.",
+                "run": _serialize_run(run, include_result=run.mode == "suggest"),
+                "assistant_message": fallback_assistant_message,
+                "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
+            },
+            status=status,
+        )

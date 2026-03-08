@@ -276,6 +276,47 @@ class AgentResearchViewsTests(TestCase):
             DocumentResearchMessage.objects.filter(session=session, role="assistant", response_id="resp_chat_done").exists()
         )
 
+    @patch("editor.agent_views._persist_chat_completion", side_effect=RuntimeError("persist boom"))
+    def test_agent_run_status_returns_fallback_chat_message_when_persist_fails(self, persist_completion):
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        user_message = DocumentResearchMessage.objects.create(
+            session=session,
+            role="user",
+            content="Can you strengthen this section?",
+            selection_text="The client reported gang extortion to police.",
+        )
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="completed",
+            stage="completed",
+            user_message=user_message,
+            response_id="resp_chat_done",
+            result_payload={
+                "answer": "Matter of C-T-L- supports the nexus rule here.",
+                "response_id": "resp_chat_done",
+                "tool_calls": [{"source": "biaedge", "type": "mcp_call", "name": "search_cases"}],
+                "citations": [],
+                "used_tools": ["biaedge"],
+                "metadata": {"model": "gpt-5.4"},
+            },
+        )
+
+        response = self.client.get(
+            reverse("research_agent_run", kwargs={"run_id": run.public_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "completed")
+        self.assertEqual(payload["assistant_message"]["content"], "Matter of C-T-L- supports the nexus rule here.")
+        self.assertEqual(payload["assistant_message"]["response_id"], "resp_chat_done")
+        persist_completion.assert_called_once()
+
+        run.refresh_from_db()
+        self.assertTrue(run.metadata.get("assistant_persist_failed"))
+        self.assertIsNone(run.assistant_message_id)
+
     @patch("editor.agent_views.DocumentResearchAgent")
     def test_agent_suggest_returns_json_for_constructor_configuration_error(self, agent_cls):
         agent_cls.side_effect = AgentConfigurationError("OPENAI_API_KEY is not configured.")
