@@ -84,6 +84,10 @@ _CHAT_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_MAX_CH
 _CHAT_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_TAIL_CHARS", "3000"))
 _SUGGEST_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_MAX_CHARS", "16000"))
 _SUGGEST_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_TAIL_CHARS", "4000"))
+_TOOL_OUTPUT_EXCERPT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_OUTPUT_EXCERPT_MAX_CHARS", "1200"))
+_TOOL_OUTPUT_EXCERPT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_OUTPUT_EXCERPT_TAIL_CHARS", "240"))
+_TOOL_RESULT_DIGEST_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_RESULT_DIGEST_MAX_CHARS", "12000"))
+_TOOL_RESULT_DIGEST_MAX_ITEMS = int(os.environ.get("OPENAI_AGENT_TOOL_RESULT_DIGEST_MAX_ITEMS", "12"))
 
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
@@ -497,6 +501,41 @@ def _extract_output_text(response: Any) -> str:
     return "\n".join(chunks).strip()
 
 
+def _compact_tool_output(raw_output: Any) -> str:
+    if raw_output in (None, ""):
+        return ""
+
+    parsed = _safe_json_loads(raw_output, default=None)
+    if parsed is None:
+        text = str(raw_output)
+    else:
+        try:
+            text = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            text = str(parsed)
+
+    return clip_document_text(
+        text,
+        max_chars=_TOOL_OUTPUT_EXCERPT_MAX_CHARS,
+        tail_chars=min(_TOOL_OUTPUT_EXCERPT_TAIL_CHARS, _TOOL_OUTPUT_EXCERPT_MAX_CHARS),
+    )
+
+
+def _public_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized = []
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+        sanitized.append(
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"output_excerpt"}
+            }
+        )
+    return sanitized
+
+
 def _extract_citations(response: Any) -> list[dict[str, Any]]:
     citations = []
     seen = set()
@@ -538,15 +577,20 @@ def _extract_hosted_tool_calls(response: Any) -> list[dict[str, Any]]:
     for item in getattr(response, "output", []) or []:
         item_type = getattr(item, "type", None)
         if item_type == "mcp_call":
-            tool_calls.append(
-                {
-                    "source": "biaedge",
-                    "type": "mcp_call",
-                    "name": getattr(item, "name", "") or "",
-                    "status": getattr(item, "status", "") or "",
-                    "arguments": _safe_json_loads(getattr(item, "arguments", ""), default={}) or {},
-                }
-            )
+            record = {
+                "source": "biaedge",
+                "type": "mcp_call",
+                "name": getattr(item, "name", "") or "",
+                "status": getattr(item, "status", "") or "",
+                "arguments": _safe_json_loads(getattr(item, "arguments", ""), default={}) or {},
+            }
+            error = (getattr(item, "error", "") or "").strip()
+            if error:
+                record["error"] = error[:500]
+            output_excerpt = _compact_tool_output(getattr(item, "output", "") or "")
+            if output_excerpt:
+                record["output_excerpt"] = output_excerpt
+            tool_calls.append(record)
         elif item_type == "web_search_call":
             tool_calls.append(
                 {
@@ -566,6 +610,48 @@ def _extract_hosted_tool_calls(response: Any) -> list[dict[str, Any]]:
                 }
             )
     return tool_calls
+
+
+def _tool_result_digest(tool_calls: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    total_chars = 0
+
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+
+        excerpt = str(item.get("output_excerpt") or "").strip()
+        error = str(item.get("error") or "").strip()
+        if not excerpt and not error:
+            continue
+
+        arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+        interesting_args = {
+            key: arguments[key]
+            for key in ["query", "document_id", "reference_id", "source", "source_code", "limit"]
+            if key in arguments and arguments[key] not in (None, "", [])
+        }
+
+        lines = [f"- {item.get('source', 'tool')}::{item.get('name', 'unknown')}"]
+        if interesting_args:
+            try:
+                lines.append(f"  args: {json.dumps(interesting_args, ensure_ascii=False, sort_keys=True)}")
+            except Exception:
+                lines.append(f"  args: {interesting_args}")
+        if error:
+            lines.append(f"  error: {error}")
+        if excerpt:
+            lines.append(f"  result: {excerpt}")
+
+        block = "\n".join(lines)
+        if total_chars and total_chars + len(block) > _TOOL_RESULT_DIGEST_MAX_CHARS:
+            break
+        blocks.append(block)
+        total_chars += len(block)
+        if len(blocks) >= _TOOL_RESULT_DIGEST_MAX_ITEMS:
+            break
+
+    return "\n\n".join(blocks).strip()
 
 
 def _pending_function_calls(response: Any) -> list[Any]:
@@ -1350,6 +1436,8 @@ class DocumentResearchAgent:
 
         metadata["failed_recovery_attempted"] = True
         run.metadata = metadata
+        compact_input = self._finalization_input_from_run(run=run)
+        use_fresh_context = bool(_tool_result_digest(run.tool_calls or []))
         try:
             follow_up = self._create_background_response(
                 instructions=(
@@ -1358,12 +1446,12 @@ class DocumentResearchAgent:
                     + "Using only the authorities and tool results already in context, provide the final answer now. "
                     + "Do not call any more tools."
                 ),
-                input_payload=(
+                input_payload=compact_input if use_fresh_context else (
                     "Provide the final answer now using the research already gathered. "
                     "Do not call any more tools."
                 ),
                 tools=[],
-                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                previous_response_id=None if use_fresh_context else ((getattr(response, "id", "") or "").strip() or None),
                 tool_choice="none",
                 max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
                 mode=run.mode,
@@ -1478,6 +1566,8 @@ class DocumentResearchAgent:
 
         metadata["forced_final_attempted"] = True
         run.metadata = metadata
+        compact_input = self._finalization_input_from_run(run=run)
+        use_fresh_context = bool(_tool_result_digest(run.tool_calls or []))
         try:
             follow_up = self._create_background_response(
                 instructions=(
@@ -1485,14 +1575,14 @@ class DocumentResearchAgent:
                     + "\n\nYou have already received the relevant tool outputs for this turn. "
                     + "Provide the final answer now and do not call any more tools."
                 ),
-                input_payload=[
+                input_payload=compact_input if use_fresh_context else [
                     {
                         "role": "user",
                         "content": "Provide the final answer to the attorney now. Do not call any more tools.",
                     }
                 ],
                 tools=[],
-                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                previous_response_id=None if use_fresh_context else ((getattr(response, "id", "") or "").strip() or None),
                 tool_choice="none",
                 max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
                 mode=run.mode,
@@ -1538,7 +1628,7 @@ class DocumentResearchAgent:
         result_payload = {
             "answer": answer,
             "response_id": (getattr(response, "id", "") or "").strip(),
-            "tool_calls": run.tool_calls or [],
+            "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
             "used_tools": _used_tools(run.tool_calls or []),
             "metadata": {
@@ -1568,7 +1658,7 @@ class DocumentResearchAgent:
                 if str(item).strip()
             ],
             "response_id": (getattr(response, "id", "") or "").strip(),
-            "tool_calls": run.tool_calls or [],
+            "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
             "raw_answer": answer,
         }
@@ -1640,6 +1730,51 @@ class DocumentResearchAgent:
             + "Do not claim you searched the database. "
             + "Use only the remaining tools, and say explicitly if database verification would materially matter."
         )
+
+    def _finalization_input_from_run(self, *, run: DocumentResearchRun) -> str:
+        request_payload = run.request_payload or {}
+        selected_text = str(request_payload.get("selected_text") or "").strip()
+        focus_note = str(request_payload.get("focus_note") or "").strip()
+        attorney_message = str(request_payload.get("message") or "").strip()
+        document_type = self.document.document_type.name if self.document.document_type else "Unknown"
+        document_slug = self.document.document_type.slug if self.document.document_type else ""
+        tool_digest = _tool_result_digest(run.tool_calls or [])
+
+        parts = [
+            "You are finalizing a research answer for the attorney using verified tool results already gathered.",
+            f"Document title: {self.document.title}",
+            f"Document type: {document_type}",
+        ]
+        if document_slug:
+            parts.append(f"Document type slug: {document_slug}")
+        if attorney_message:
+            parts.extend(["", "Attorney request:", attorney_message[:4000]])
+        if selected_text:
+            parts.extend(["", "Selected text:", selected_text[:4000]])
+        if focus_note:
+            parts.extend(["", "User focus note:", focus_note[:2000]])
+        if tool_digest:
+            parts.extend(["", "Verified research results from tools:", tool_digest])
+
+        if run.mode == "suggest":
+            parts.extend(
+                [
+                    "",
+                    "Task:",
+                    "Return the final structured authority suggestion now using only the verified research above. Do not call any tools.",
+                ]
+            )
+        else:
+            parts.extend(
+                [
+                    "",
+                    "Task:",
+                    "Answer the attorney directly using only the verified research above. Do not call any tools. "
+                    "If the gathered research is insufficient for any requested quote or proposition, say so plainly.",
+                ]
+            )
+
+        return "\n".join(parts).strip()
 
     def _document_context_block(self, *, mode: str, selected_text: str = "", focus_note: str = "") -> str:
         doc_type = self.document.document_type.name if self.document.document_type else "Unknown"

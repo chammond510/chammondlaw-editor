@@ -14,6 +14,7 @@ from .agent_service import (
     AgentConfigurationError,
     DocumentResearchAgent,
     _extract_output_text,
+    _extract_hosted_tool_calls,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
 )
@@ -538,6 +539,26 @@ class AgentServiceTests(TestCase):
 
         self.assertEqual(_extract_output_text(response), "I can’t comply with that request.")
 
+    def test_extract_hosted_tool_calls_captures_mcp_output_excerpt(self):
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="mcp_call",
+                    name="get_reference",
+                    status="completed",
+                    arguments='{"reference_id": 324, "max_chars": 12000}',
+                    output='{"title":"USCIS Policy Manual","text":"Generally, a CPR who initially files a waiver under one waiver filing basis may change to or add another waiver filing basis by making the request in writing."}',
+                    error="",
+                )
+            ]
+        )
+
+        tool_calls = _extract_hosted_tool_calls(response)
+
+        self.assertEqual(tool_calls[0]["name"], "get_reference")
+        self.assertIn("output_excerpt", tool_calls[0])
+        self.assertIn("waiver filing basis", tool_calls[0]["output_excerpt"])
+
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
             _normalize_mcp_server_url("biaedge-mcp.onrender.com"),
@@ -597,6 +618,47 @@ class AgentServiceTests(TestCase):
         self.assertEqual(recovery_request["tool_choice"], "none")
         self.assertEqual(recovery_request["max_output_tokens"], AGENT_FINALIZATION_MAX_OUTPUT_TOKENS)
         self.assertEqual(recovery_request["reasoning_effort"], AGENT_FINALIZATION_REASONING_EFFORT)
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_queue_force_final_response_uses_compacted_tool_digest_without_previous_chain(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_current",
+            request_payload={
+                "message": "Find quotes for this paragraph.",
+                "selected_text": "Selected paragraph text.",
+            },
+            tool_calls=[
+                {
+                    "source": "biaedge",
+                    "type": "mcp_call",
+                    "name": "get_reference",
+                    "status": "completed",
+                    "arguments": {"reference_id": 324},
+                    "output_excerpt": '{"title":"USCIS Policy Manual","text":"A CPR may change to or add another waiver filing basis by making the request in writing."}',
+                }
+            ],
+        )
+        current_response = SimpleNamespace(id="resp_current")
+        queued_response = SimpleNamespace(id="resp_final", status="queued", error=None, usage=None, output=[])
+
+        with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+            updated = agent._queue_force_final_response(run=run, response=current_response)
+
+        self.assertEqual(updated.response_id, "resp_final")
+        request = create_background.call_args.kwargs
+        self.assertIsNone(request["previous_response_id"])
+        self.assertEqual(request["tool_choice"], "none")
+        self.assertIn("Verified research results from tools:", request["input_payload"])
+        self.assertIn("waiver filing basis", request["input_payload"])
 
     @patch("editor.agent_service._new_openai_client")
     def test_failed_status_with_tool_budget_has_clearer_error_message(self, new_client):
