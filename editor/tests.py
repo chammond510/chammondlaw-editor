@@ -563,6 +563,36 @@ class AgentServiceTests(TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertIn("tool-call budget", updated.error_message)
 
+    @patch("editor.agent_service._new_openai_client")
+    def test_incomplete_without_answer_forces_final_response_instead_of_more_continuations(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_incomplete",
+            tool_calls=[{"source": "biaedge", "name": "search_cases", "type": "mcp_call"}],
+        )
+        incomplete_response = SimpleNamespace(
+            id="resp_incomplete",
+            status="incomplete",
+            error=None,
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            output_text="",
+            output=[],
+        )
+
+        with patch.object(agent, "_queue_force_final_response", return_value=run) as force_final:
+            updated = agent._continue_incomplete_response(run=run, response=incomplete_response)
+
+        self.assertIs(updated, run)
+        force_final.assert_called_once_with(run=run, response=incomplete_response)
+
 
 class CoverLetterExportTests(TestCase):
     def setUp(self):

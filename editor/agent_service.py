@@ -71,6 +71,10 @@ _JSON_REPAIR_MAX_OUTPUT_TOKENS = 1200
 _CONTINUE_RESPONSE_MAX_OUTPUT_TOKENS = 900
 _ACTIVE_RUN_STATUSES = {"queued", "in_progress"}
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
+_CHAT_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_MAX_CHARS", "12000"))
+_CHAT_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_TAIL_CHARS", "3000"))
+_SUGGEST_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_MAX_CHARS", "16000"))
+_SUGGEST_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_TAIL_CHARS", "4000"))
 
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
@@ -1359,6 +1363,10 @@ class DocumentResearchAgent:
     def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
         attempts = int(metadata.get("continuation_attempts") or 0)
+        has_answer_text = bool(_extract_output_text(response))
+        if not has_answer_text:
+            if run.tool_calls or attempts >= 1:
+                return self._queue_force_final_response(run=run, response=response)
         if attempts >= 2:
             return self._mark_run_failed(
                 run,
@@ -1615,11 +1623,17 @@ class DocumentResearchAgent:
             + "Use only the remaining tools, and say explicitly if database verification would materially matter."
         )
 
-    def _document_context_block(self, *, selected_text: str = "", focus_note: str = "") -> str:
+    def _document_context_block(self, *, mode: str, selected_text: str = "", focus_note: str = "") -> str:
         doc_type = self.document.document_type.name if self.document.document_type else "Unknown"
         doc_slug = self.document.document_type.slug if self.document.document_type else ""
         plain_text = extract_plain_text(self.document.content, max_chars=40000)
-        clipped_text = clip_document_text(plain_text, max_chars=18000, tail_chars=5000)
+        if mode == "suggest":
+            max_chars = _SUGGEST_DOCUMENT_MAX_CHARS
+            tail_chars = _SUGGEST_DOCUMENT_TAIL_CHARS
+        else:
+            max_chars = _CHAT_DOCUMENT_MAX_CHARS
+            tail_chars = _CHAT_DOCUMENT_TAIL_CHARS
+        clipped_text = clip_document_text(plain_text, max_chars=max_chars, tail_chars=tail_chars)
 
         lines = [
             "Current document context:",
@@ -1658,13 +1672,13 @@ class DocumentResearchAgent:
         blocks = []
         if transcript:
             blocks.append("Conversation so far:\n" + transcript)
-        blocks.append(self._document_context_block(selected_text=selected_text))
+        blocks.append(self._document_context_block(mode="chat", selected_text=selected_text))
         blocks.append("User message:\n" + message.strip())
         return "\n\n".join(block for block in blocks if block).strip()
 
     def _suggest_input(self, *, selected_text: str, focus_note: str = "") -> str:
         return (
-            self._document_context_block(selected_text=selected_text, focus_note=focus_note)
+            self._document_context_block(mode="suggest", selected_text=selected_text, focus_note=focus_note)
             + "\n\nTask:\n"
             + "Suggest the best authorities for the selected passage in this document."
         )
