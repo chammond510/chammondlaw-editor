@@ -487,6 +487,82 @@ class AgentServiceTests(TestCase):
             "http://localhost:8001/mcp",
         )
 
+    @patch("editor.agent_service._new_openai_client")
+    def test_failed_status_with_tool_budget_attempts_final_recovery(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_failed",
+            tool_calls=[
+                {"source": "biaedge", "name": f"search_cases_{index}", "type": "mcp_call"}
+                for index in range(24)
+            ],
+        )
+        failed_response = SimpleNamespace(
+            id="resp_failed",
+            status="failed",
+            error=None,
+            incomplete_details=None,
+            usage=None,
+            output=[],
+        )
+        recovery_response = SimpleNamespace(
+            id="resp_recover",
+            status="queued",
+            error=None,
+            usage=None,
+            output=[],
+        )
+
+        agent.client.responses.retrieve = lambda *args, **kwargs: failed_response
+        with patch.object(agent, "_create_background_response", return_value=recovery_response):
+            updated = agent.advance_run(run=run)
+
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.stage, "recovering_failure")
+        self.assertEqual(updated.response_id, "resp_recover")
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_failed_status_with_tool_budget_has_clearer_error_message(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_failed",
+            tool_calls=[
+                {"source": "biaedge", "name": f"search_cases_{index}", "type": "mcp_call"}
+                for index in range(24)
+            ],
+            metadata={"failed_recovery_attempted": True},
+        )
+        failed_response = SimpleNamespace(
+            id="resp_failed",
+            status="failed",
+            error=None,
+            incomplete_details=None,
+            usage=None,
+            output=[],
+        )
+
+        agent.client.responses.retrieve = lambda *args, **kwargs: failed_response
+        updated = agent.advance_run(run=run)
+
+        self.assertEqual(updated.status, "failed")
+        self.assertIn("tool-call budget", updated.error_message)
+
 
 class CoverLetterExportTests(TestCase):
     def setUp(self):

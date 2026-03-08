@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 AGENT_MODEL = os.environ.get("OPENAI_AGENT_MODEL", "gpt-5.4")
 AGENT_REASONING_EFFORT = os.environ.get("OPENAI_AGENT_REASONING_EFFORT", "high").strip().lower() or "high"
-AGENT_MAX_TOOL_CALLS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_CALLS", "12"))
+AGENT_MAX_TOOL_CALLS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_CALLS", "24"))
 AGENT_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_TOKENS", "1800"))
 AGENT_HTTP_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AGENT_HTTP_TIMEOUT_SECONDS", "25"))
 AGENT_MAX_RUN_SECONDS = int(os.environ.get("OPENAI_AGENT_MAX_RUN_SECONDS", "300"))
@@ -83,6 +83,10 @@ Research operating rules:
 5. Prefer precedential authorities in your legal analysis. If you mention unpublished decisions or non-precedential material, label that clearly.
 6. If the user asks you to search the database, actually use the database tools instead of answering from memory.
 7. If controlling authority is thin or uncertain, say so directly.
+8. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
+9. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
+10. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
+11. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
 - Be direct, practical, and collaborative.
@@ -101,6 +105,10 @@ Hard rules:
 4. Do not invent any citation, holding, or proposition.
 5. If the selected text is vague or under-supported, explain the gap instead of bluffing.
 6. Return valid JSON only. No markdown fences, no prose outside the JSON object.
+7. Research efficiently. Start broad, then narrow to the best 2 to 5 authorities for this passage.
+8. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
+9. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
+10. Once you have enough verified authority to support the selection, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
 {
@@ -224,6 +232,14 @@ def _response_error_message(response: Any) -> str:
     if status:
         return f"OpenAI response returned status={status}."
     return "OpenAI response failed."
+
+
+def _looks_like_generic_failed_status(message: str) -> bool:
+    normalized = (message or "").strip().lower()
+    return normalized in {
+        "openai response returned status=failed.",
+        "openai response failed.",
+    }
 
 
 def _safe_json_loads(raw: Any, default=None):
@@ -865,7 +881,10 @@ class DocumentResearchAgent:
         if status == "cancelled":
             return self._mark_run_cancelled(run, _response_error_message(response) or "The agent run was cancelled.")
         if status == "failed":
-            return self._mark_run_failed(run, _response_error_message(response))
+            recovered = self._recover_failed_response(run=run, response=response)
+            if recovered:
+                return recovered
+            return self._mark_run_failed(run, self._failed_status_message(run=run, response=response))
         if status == "incomplete":
             return self._continue_incomplete_response(run=run, response=response)
         if status != "completed":
@@ -1170,6 +1189,9 @@ class DocumentResearchAgent:
                 "stage",
                 "response_id",
                 "response_count",
+                "request_payload",
+                "previous_response_id",
+                "local_function_rounds",
                 "tool_calls",
                 "citations",
                 "usage",
@@ -1265,6 +1287,24 @@ class DocumentResearchAgent:
         )
         return run
 
+    def _failed_status_message(self, *, run: DocumentResearchRun, response: Any) -> str:
+        message = _response_error_message(response)
+        if not _looks_like_generic_failed_status(message):
+            return message
+
+        tool_call_count = len(run.tool_calls or [])
+        if tool_call_count >= AGENT_MAX_TOOL_CALLS:
+            return (
+                "The agent exhausted its OpenAI tool-call budget before it could finish the answer. "
+                "Try again now that the tool budget has been increased."
+            )
+        if tool_call_count:
+            return (
+                "The agent gathered research but failed before it produced the final answer. "
+                "Retrying should now be more reliable."
+            )
+        return message
+
     def _budget_error(self, run: DocumentResearchRun) -> str:
         elapsed_seconds = max(0, int((timezone.now() - run.created_at).total_seconds()))
         if elapsed_seconds > AGENT_MAX_RUN_SECONDS:
@@ -1282,6 +1322,39 @@ class DocumentResearchAgent:
         if int(usage.get("reasoning_tokens") or 0) > AGENT_MAX_REASONING_TOKENS:
             return f"The agent run exceeded the reasoning token budget of {AGENT_MAX_REASONING_TOKENS}."
         return ""
+
+    def _recover_failed_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun | None:
+        metadata = dict(run.metadata or {})
+        if metadata.get("failed_recovery_attempted"):
+            return None
+        if not (run.tool_calls or []):
+            return None
+
+        metadata["failed_recovery_attempted"] = True
+        run.metadata = metadata
+        try:
+            follow_up = self._create_background_response(
+                instructions=(
+                    self._run_instructions(run)
+                    + "\n\nYour previous response ended after gathering research. "
+                    + "Using only the authorities and tool results already in context, provide the final answer now. "
+                    + "Do not call any more tools."
+                ),
+                input_payload=(
+                    "Provide the final answer now using the research already gathered. "
+                    "Do not call any more tools."
+                ),
+                tools=[],
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError:
+            return None
+
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=follow_up, stage="recovering_failure")
 
     def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})

@@ -35,7 +35,7 @@ def post_fork(server, worker):
         f"worker_pid={worker.pid}"
     )
     faulthandler.enable(file=sys.stderr, all_threads=True)
-    faulthandler.dump_traceback_later(20, repeat=True, file=sys.stderr)
+    faulthandler.dump_traceback_later(60, repeat=False, file=sys.stderr)
 
 
 def post_worker_init(worker):
