@@ -536,6 +536,22 @@ def _public_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sanitized
 
 
+def _join_text_fragments(fragments: list[str]) -> str:
+    combined = ""
+    for fragment in fragments:
+        text = str(fragment or "")
+        if not text:
+            continue
+        if not combined:
+            combined = text
+            continue
+        if combined[-1].isspace() or text[0].isspace() or text[0] in ",.;:!?)]}":
+            combined += text
+        else:
+            combined += " " + text
+    return combined
+
+
 def _extract_citations(response: Any) -> list[dict[str, Any]]:
     citations = []
     seen = set()
@@ -1000,7 +1016,11 @@ class DocumentResearchAgent:
         if function_calls:
             return self._continue_after_function_calls(run=run, response=response, function_calls=function_calls)
 
-        answer = _extract_output_text(response)
+        answer = self._assembled_answer(
+            run=run,
+            response=response,
+            answer=_extract_output_text(response),
+        )
         if not answer:
             return self._queue_force_final_response(run=run, response=response)
 
@@ -1188,12 +1208,46 @@ class DocumentResearchAgent:
             "forced_final_attempted": False,
             "json_repair_attempted": False,
             "continuation_attempts": 0,
+            "answer_fragments": [],
             "usage_by_response_id": {},
             "prompt_cache_key": self._prompt_cache_key(mode),
         }
 
     def _prompt_cache_key(self, mode: str) -> str:
         return f"document-agent:{mode}:{self.document.id}"
+
+    def _append_answer_fragment(self, *, run: DocumentResearchRun, response: Any) -> None:
+        fragment = _extract_output_text(response)
+        if not fragment:
+            return
+
+        response_id = (getattr(response, "id", "") or "").strip()
+        metadata = dict(run.metadata or {})
+        fragments = [
+            item for item in (metadata.get("answer_fragments") or [])
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        if response_id and any(str(item.get("response_id") or "") == response_id for item in fragments):
+            return
+
+        fragments.append(
+            {
+                "response_id": response_id,
+                "text": fragment,
+            }
+        )
+        metadata["answer_fragments"] = fragments[-6:]
+        run.metadata = metadata
+
+    def _assembled_answer(self, *, run: DocumentResearchRun, response: Any, answer: str) -> str:
+        fragments = [
+            str(item.get("text") or "")
+            for item in (dict(run.metadata or {}).get("answer_fragments") or [])
+            if isinstance(item, dict)
+        ]
+        if answer:
+            fragments.append(answer)
+        return _join_text_fragments(fragments)
 
     def _run_instructions(self, run: DocumentResearchRun) -> str:
         if run.mode == "suggest":
@@ -1464,18 +1518,20 @@ class DocumentResearchAgent:
         return self._attach_started_response(run=run, response=follow_up, stage="recovering_failure")
 
     def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
-        metadata = dict(run.metadata or {})
-        attempts = int(metadata.get("continuation_attempts") or 0)
+        attempts = int((run.metadata or {}).get("continuation_attempts") or 0)
         has_answer_text = bool(_extract_output_text(response))
         if not has_answer_text:
             if run.tool_calls or attempts >= 1:
                 return self._queue_force_final_response(run=run, response=response)
+        else:
+            self._append_answer_fragment(run=run, response=response)
         if attempts >= 2:
             return self._mark_run_failed(
                 run,
                 _response_error_message(response) or "The agent response remained incomplete after continuation attempts.",
             )
 
+        metadata = dict(run.metadata or {})
         metadata["continuation_attempts"] = attempts + 1
         run.metadata = metadata
         try:
@@ -1922,6 +1978,7 @@ class DocumentResearchAgent:
     ) -> dict[str, Any]:
         tool_calls: list[dict[str, Any]] = []
         citations: list[dict[str, Any]] = []
+        answer_fragments: list[str] = []
         response = None
         current_input = input_payload
         current_previous_id = previous_response_id
@@ -1974,6 +2031,9 @@ class DocumentResearchAgent:
 
             status = (getattr(response, "status", "") or "").strip().lower()
             if status == "incomplete" and continuation_budget > 0:
+                partial_answer = _extract_output_text(response)
+                if partial_answer:
+                    answer_fragments.append(partial_answer)
                 continuation_budget -= 1
                 current_input = (
                     "Continue exactly where you left off and finish the response. "
@@ -1993,7 +2053,7 @@ class DocumentResearchAgent:
         if response is None:
             raise AgentExecutionError("No response was generated.")
 
-        answer = _extract_output_text(response)
+        answer = _join_text_fragments(answer_fragments + [_extract_output_text(response)])
         if not answer:
             logger.warning(
                 "Document research agent produced no assistant text; attempting finalization.",
@@ -2013,8 +2073,9 @@ class DocumentResearchAgent:
             if forced:
                 tool_calls.extend(forced["tool_calls"])
                 citations.extend(forced["citations"])
+                forced_answer = _join_text_fragments(answer_fragments + [forced["answer"]])
                 return {
-                    "answer": forced["answer"],
+                    "answer": forced_answer,
                     "response_id": forced["response_id"],
                     "tool_calls": tool_calls,
                     "citations": citations,

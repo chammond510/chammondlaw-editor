@@ -724,6 +724,94 @@ class AgentServiceTests(TestCase):
         self.assertIs(updated, run)
         force_final.assert_called_once_with(run=run, response=incomplete_response)
 
+    @patch("editor.agent_service._new_openai_client")
+    def test_advance_run_reassembles_partial_answer_across_continuation(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_partial",
+            metadata=agent._initial_run_metadata(mode="chat", previous_response_id=""),
+        )
+
+        partial_response = SimpleNamespace(
+            id="resp_partial",
+            status="incomplete",
+            error=None,
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            output_text="Beginning of the answer. ",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text="Beginning of the answer. ",
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            usage=None,
+        )
+        queued_response = SimpleNamespace(
+            id="resp_tail",
+            status="queued",
+            error=None,
+            usage=None,
+            output=[],
+        )
+        tail_response = SimpleNamespace(
+            id="resp_tail",
+            status="completed",
+            error=None,
+            output_text="End of the answer.",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text="End of the answer.",
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            usage=None,
+        )
+
+        def retrieve(response_id, **kwargs):
+            if response_id == "resp_partial":
+                return partial_response
+            if response_id == "resp_tail":
+                return tail_response
+            raise AssertionError(f"Unexpected response id: {response_id}")
+
+        agent.client.responses.retrieve = retrieve
+
+        with patch.object(agent, "_build_tools", return_value=[]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response):
+                updated = agent.advance_run(run=run)
+
+        self.assertEqual(updated.response_id, "resp_tail")
+        self.assertEqual(updated.status, "queued")
+
+        updated.refresh_from_db()
+        completed = agent.advance_run(run=updated)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            completed.result_payload["answer"],
+            "Beginning of the answer. End of the answer.",
+        )
+
 
 class CoverLetterExportTests(TestCase):
     def setUp(self):
