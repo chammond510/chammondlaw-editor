@@ -1457,6 +1457,16 @@ function operationLabel(operation) {
   return 'Append to document';
 }
 
+function effectiveEditOperation(result) {
+  if (!result) return 'append_to_document';
+  const operation = String(result.operation || '').trim() || 'append_to_document';
+  const expectedTarget = normalizeSelectionText(result.selected_text || result.target_text);
+  if (operation === 'append_to_document' && expectedTarget) {
+    return 'replace_selection';
+  }
+  return operation;
+}
+
 function paragraphNodeFromText(block) {
   const lines = String(block || '').split('\n');
   const content = [];
@@ -1480,7 +1490,8 @@ function tiptapNodesFromPlainText(text) {
 }
 
 function resolveEditTargetRange(result) {
-  if (!result || result.operation === 'append_to_document') {
+  const operation = effectiveEditOperation(result);
+  if (!result || operation === 'append_to_document') {
     return null;
   }
 
@@ -1503,14 +1514,42 @@ function resolveEditTargetRange(result) {
     }
   }
 
+  const exactTarget = String(result.target_text || result.selected_text || '').trim();
+  if (exactTarget) {
+    let matchedRange = null;
+    editor.state.doc.descendants((node, pos) => {
+      if (matchedRange || !node.isTextblock) return !matchedRange;
+      const blockText = String(node.textContent || '');
+      if (!blockText) return true;
+      const exactIndex = blockText.indexOf(exactTarget);
+      if (exactIndex !== -1) {
+        matchedRange = {
+          from: pos + 1 + exactIndex,
+          to: pos + 1 + exactIndex + exactTarget.length,
+        };
+        return false;
+      }
+      if (expected && normalizeSelectionText(blockText) === expected) {
+        matchedRange = {
+          from: pos + 1,
+          to: pos + 1 + node.content.size,
+        };
+        return false;
+      }
+      return true;
+    });
+    if (matchedRange) return matchedRange;
+  }
+
   return null;
 }
 
 function applyEditOperationLocally(result) {
   const beforeContent = editor.getJSON();
+  const operation = effectiveEditOperation(result);
   let applied = false;
   try {
-    if (result.operation === 'append_to_document') {
+    if (operation === 'append_to_document') {
       editor.chain().focus(editor.state.doc.content.size).insertContent(
         tiptapNodesFromPlainText(result.proposed_text || '')
       ).run();
@@ -1519,11 +1558,11 @@ function applyEditOperationLocally(result) {
       if (!range) {
         throw new Error('Select the exact passage you want the agent to edit, then apply the proposal again.');
       }
-      if (result.operation === 'delete_selection') {
+      if (operation === 'delete_selection') {
         editor.chain().focus().deleteRange(range).run();
-      } else if (result.operation === 'replace_selection') {
+      } else if (operation === 'replace_selection') {
         editor.chain().focus().insertContentAt(range, tiptapNodesFromPlainText(result.proposed_text || '')).run();
-      } else if (result.operation === 'insert_after_selection') {
+      } else if (operation === 'insert_after_selection') {
         editor.chain().focus().insertContentAt(range.to, tiptapNodesFromPlainText(result.proposed_text || '')).run();
       } else {
         throw new Error('Unsupported edit operation returned by the agent.');
@@ -1609,7 +1648,7 @@ function renderEditResponse(result) {
       <div class="flex items-start justify-between gap-3">
         <div>
           <div class="text-sm font-semibold text-navy">${escapeHtml(result.edit_summary || 'Proposed edit')}</div>
-          <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(operationLabel(result.operation))}</div>
+          <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(operationLabel(effectiveEditOperation(result)))}</div>
           ${appliedMarkup}
         </div>
         <button id="apply-agent-edit" class="px-3 py-1 text-xs rounded ${result.applied_at ? 'border text-gray-400 cursor-not-allowed' : 'bg-gold text-navy'}" ${result.applied_at ? 'disabled' : ''}>${result.applied_at ? 'Applied' : 'Apply Edit'}</button>

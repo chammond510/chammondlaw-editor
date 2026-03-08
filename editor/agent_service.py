@@ -1264,6 +1264,8 @@ def _normalize_edit_operation(value: Any, *, has_selected_text: bool) -> str:
     operation = str(value or "").strip().lower()
     if operation not in _EDIT_OPERATIONS:
         operation = "replace_selection" if has_selected_text else "append_to_document"
+    if has_selected_text and operation == "append_to_document":
+        operation = "replace_selection"
     if not has_selected_text and operation != "append_to_document":
         operation = "append_to_document"
     return operation
@@ -1345,7 +1347,7 @@ class DocumentResearchAgent:
             input_payload = self._chat_input(
                 message=normalized_message,
                 selected_text=normalized_selection,
-                transcript_messages=[] if run.previous_response_id else transcript_messages,
+                transcript_messages=transcript_messages,
             )
             try:
                 response = self._create_background_response(
@@ -2517,9 +2519,14 @@ class DocumentResearchAgent:
             metadata["finalization_source"] = "normal"
             run.metadata = metadata
             self._refresh_run_evidence_pack(run=run)
+        response_id = (getattr(response, "id", "") or "").strip()
+        session = run.session
+        if response_id and session.last_response_id != response_id:
+            session.last_response_id = response_id
+            session.save(update_fields=["last_response_id", "updated_at"])
         result_payload = {
             "answer": answer,
-            "response_id": (getattr(response, "id", "") or "").strip(),
+            "response_id": response_id,
             "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
             "used_tools": _used_tools(run.tool_calls or []),

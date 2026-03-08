@@ -992,6 +992,40 @@ class AgentServiceTests(TestCase):
         self.assertEqual(metrics["tool_source_counts"]["biaedge"], 1)
         self.assertIn("biaedge", metrics["used_sources"])
 
+    @patch("editor.agent_service._new_openai_client")
+    def test_start_chat_run_includes_transcript_even_with_previous_response_id(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="queued",
+            stage="queued",
+        )
+        transcript_messages = [
+            SimpleNamespace(role="user", content="First question"),
+            SimpleNamespace(role="assistant", content="First answer"),
+        ]
+        queued_response = SimpleNamespace(id="resp_chat_start", status="queued", error=None, usage=None, output=[])
+
+        with patch.object(agent, "_build_tools", return_value=[]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+                agent.start_chat_run(
+                    run=run,
+                    message="Follow-up question",
+                    selected_text="",
+                    previous_response_id="resp_prev",
+                    transcript_messages=transcript_messages,
+                )
+
+        request = create_background.call_args.kwargs
+        self.assertEqual(request["previous_response_id"], "resp_prev")
+        self.assertIn("Conversation so far:", request["input_payload"])
+        self.assertIn("First question", request["input_payload"])
+
     def test_normalize_edit_result_falls_back_to_append_without_selected_text(self):
         normalized = _normalize_edit_result(
             {
@@ -1003,6 +1037,18 @@ class AgentServiceTests(TestCase):
         )
 
         self.assertEqual(normalized["operation"], "append_to_document")
+
+    def test_normalize_edit_result_coerces_append_to_replace_when_selection_exists(self):
+        normalized = _normalize_edit_result(
+            {
+                "edit_summary": "Revise the selected paragraph",
+                "operation": "append_to_document",
+                "proposed_text": "Revised paragraph text.",
+            },
+            request_payload={"selected_text": "Original selected paragraph."},
+        )
+
+        self.assertEqual(normalized["operation"], "replace_selection")
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
@@ -1106,6 +1152,28 @@ class AgentServiceTests(TestCase):
         self.assertIn("waiver filing basis", request["input_payload"])
         self.assertEqual(updated.metadata["finalization_source"], "empty_response")
         self.assertEqual(updated.metadata["metrics"]["finalization_source"], "empty_response")
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_finalize_chat_run_updates_session_last_response_id(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            metadata=agent._initial_run_metadata(mode="chat", previous_response_id=""),
+        )
+        response = SimpleNamespace(id="resp_chat_final")
+
+        completed = agent._finalize_chat_run(run=run, response=response, answer="Final answer text.")
+
+        self.assertEqual(completed.result_payload["response_id"], "resp_chat_final")
+        session.refresh_from_db()
+        self.assertEqual(session.last_response_id, "resp_chat_final")
 
     @patch("editor.agent_service._new_openai_client")
     def test_failed_status_with_tool_budget_has_clearer_error_message(self, new_client):
