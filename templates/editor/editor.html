@@ -100,6 +100,7 @@
             <button id="tab-chat" class="tab-btn tab-btn-active px-3 py-1 text-xs rounded">Chat</button>
             <button id="tab-suggest" class="tab-btn px-3 py-1 text-xs rounded border">Suggest</button>
             <button id="tab-edit" class="tab-btn px-3 py-1 text-xs rounded border">Edit</button>
+            <button id="tab-client-docs" class="tab-btn px-3 py-1 text-xs rounded border">Client Docs</button>
             <button id="tab-exemplars" class="tab-btn px-3 py-1 text-xs rounded border">Exemplars</button>
         </div>
 
@@ -157,6 +158,22 @@
                 The agent can propose a controlled edit to selected text or draft new language. It will not change the document until you apply it.
             </div>
             <div id="agent-edit-result" class="space-y-2"></div>
+        </div>
+
+        <div id="client-docs-panel" class="p-3 hidden space-y-3">
+            <form id="client-doc-upload-form" class="border rounded p-2 space-y-2">
+                <div class="text-xs font-semibold text-gray-700">Upload Client Document</div>
+                <input type="file" id="client-doc-file" name="file" class="w-full text-xs" accept=".pdf,.docx,.txt,.md,.rtf" required>
+                <input type="text" id="client-doc-title" name="title" class="w-full border rounded px-2 py-1 text-xs" placeholder="Title (optional)">
+                <button type="submit" class="w-full px-2 py-1 text-xs bg-navy text-white rounded">Upload</button>
+                <div class="text-[11px] text-gray-500">Uploaded files stay attached to this draft so the agent can reference them.</div>
+            </form>
+            <div class="flex gap-2">
+                <input id="client-doc-query" class="w-full border rounded px-2 py-1 text-sm" placeholder="Search uploaded client docs..." />
+                <button id="run-client-doc-search" class="px-2 py-1 text-xs border rounded">Search</button>
+            </div>
+            <div id="client-doc-status" class="text-xs text-gray-500">Upload factual records, declarations, USCIS notices, or prior filings for the agent to reference.</div>
+            <div id="client-doc-results" class="space-y-2"></div>
         </div>
 
         <div id="exemplar-panel" class="p-3 hidden space-y-3">
@@ -222,6 +239,14 @@
                 <button id="insert-exemplar-text" class="text-xs bg-gold text-navy px-2 py-1 rounded">Insert Excerpt</button>
             </div>
             <div id="exemplar-detail" class="p-3 text-sm"></div>
+        </div>
+
+        <div id="client-doc-detail-panel" class="hidden absolute right-0 top-0 w-[420px] h-full bg-white border-l border-gray-200 overflow-y-auto z-20">
+            <div class="p-3 border-b flex justify-between items-center">
+                <button id="client-doc-back" class="text-xs text-navy">← Back to client docs</button>
+                <button id="insert-client-doc-text" class="text-xs bg-gold text-navy px-2 py-1 rounded">Insert Excerpt</button>
+            </div>
+            <div id="client-doc-detail" class="p-3 text-sm"></div>
         </div>
     </aside>
 </div>
@@ -329,6 +354,7 @@ const docId = '{{ document.id }}';
 const csrfToken = '{{ csrf_token }}';
 let currentCase = null;
 let currentExemplar = null;
+let currentClientDoc = null;
 let isSaving = false;
 let saveTimeout = null;
 let selectedVersionId = null;
@@ -682,6 +708,7 @@ function closeSidebar() {
   editorShell.classList.remove('research-open');
   document.getElementById('case-panel').classList.add('hidden');
   document.getElementById('exemplar-detail-panel').classList.add('hidden');
+  document.getElementById('client-doc-detail-panel').classList.add('hidden');
 }
 document.getElementById('research-toggle').addEventListener('click', openSidebar);
 document.getElementById('research-close').addEventListener('click', closeSidebar);
@@ -751,6 +778,7 @@ function toolSourceSummary(toolCalls = []) {
   toolCalls.forEach(call => {
     if (call.source === 'biaedge' && !labels.includes('BIA Edge')) labels.push('BIA Edge');
     if (call.source === 'web' && !labels.includes('web search')) labels.push('web search');
+    if (call.source === 'client_docs' && !labels.includes('client docs')) labels.push('client docs');
     if (call.source === 'knowledge' && !labels.includes('knowledge base')) labels.push('knowledge base');
   });
   return labels.length ? `Used: ${labels.join(', ')}` : '';
@@ -1738,12 +1766,14 @@ function setTab(tabName) {
   const chatPanel = document.getElementById('chat-panel');
   const suggestPanel = document.getElementById('suggest-panel');
   const editPanel = document.getElementById('edit-panel');
+  const clientDocsPanel = document.getElementById('client-docs-panel');
   const exemplarPanel = document.getElementById('exemplar-panel');
   const exemplarResults = document.getElementById('exemplar-results');
 
   chatPanel.classList.add('hidden');
   suggestPanel.classList.add('hidden');
   editPanel.classList.add('hidden');
+  clientDocsPanel.classList.add('hidden');
   exemplarPanel.classList.add('hidden');
   exemplarResults.classList.add('hidden');
 
@@ -1767,6 +1797,14 @@ function setTab(tabName) {
     editPanel.classList.remove('hidden');
     refreshResearchSelectionDisplays();
   }
+  if (tabName === 'client-docs') {
+    document.getElementById('tab-client-docs').classList.add('tab-btn-active');
+    document.getElementById('tab-client-docs').classList.remove('border');
+    clientDocsPanel.classList.remove('hidden');
+    if (!document.getElementById('client-doc-results').dataset.loaded) {
+      loadClientDocs();
+    }
+  }
   if (tabName === 'exemplars') {
     document.getElementById('tab-exemplars').classList.add('tab-btn-active');
     document.getElementById('tab-exemplars').classList.remove('border');
@@ -1783,6 +1821,7 @@ document.getElementById('agent-reset').addEventListener('click', resetAgentSessi
 document.getElementById('tab-chat').addEventListener('click', () => setTab('chat'));
 document.getElementById('tab-suggest').addEventListener('click', () => setTab('suggest'));
 document.getElementById('tab-edit').addEventListener('click', () => setTab('edit'));
+document.getElementById('tab-client-docs').addEventListener('click', () => setTab('client-docs'));
 document.getElementById('tab-exemplars').addEventListener('click', () => setTab('exemplars'));
 document.getElementById('refresh-suggest-selection').addEventListener('click', refreshResearchSelectionDisplays);
 document.getElementById('refresh-edit-selection').addEventListener('click', refreshResearchSelectionDisplays);
@@ -1804,8 +1843,79 @@ refreshResearchSelectionDisplays();
 setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
 setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
 setEditStatus(AGENT_DEFAULT_EDIT_STATUS, 'neutral');
+setClientDocStatus('Upload factual records, declarations, USCIS notices, or prior filings for the agent to reference.', 'neutral');
 renderEditPlaceholder('Select text to revise or describe new language to draft.', 'neutral');
 syncAgentControls();
+
+function setClientDocStatus(message, tone = 'neutral') {
+  const node = document.getElementById('client-doc-status');
+  node.textContent = message || 'Upload factual records, declarations, USCIS notices, or prior filings for the agent to reference.';
+  setStatusTone(node, tone);
+}
+
+function clientDocCard(item) {
+  return `<div class="border rounded p-2 bg-white hover:border-navy">
+    <button class="client-doc-open text-left w-full text-sm font-semibold text-navy" data-id="${item.id}">${escapeHtml(item.title || 'Client document')}</button>
+    <div class="text-xs text-gray-600">${escapeHtml(item.filename || '')}${item.extension ? ` · ${escapeHtml(item.extension)}` : ''}</div>
+    <div class="text-xs text-gray-700 mt-1">${escapeHtml((item.snippet || '').slice(0, 240))}</div>
+    <div class="mt-2 flex gap-2">
+      <button class="client-doc-insert border rounded px-2 py-0.5 text-xs" data-id="${item.id}">Insert Excerpt</button>
+    </div>
+  </div>`;
+}
+
+function renderClientDocResults(items) {
+  const node = document.getElementById('client-doc-results');
+  node.dataset.loaded = '1';
+  node.innerHTML = items.length ? items.map(clientDocCard).join('') : '<div class="text-xs text-gray-500">No client documents uploaded for this draft yet.</div>';
+  node.querySelectorAll('.client-doc-open').forEach(btn => btn.addEventListener('click', () => openClientDoc(btn.dataset.id)));
+  node.querySelectorAll('.client-doc-insert').forEach(btn => btn.addEventListener('click', async () => {
+    const detail = await getClientDocDetail(btn.dataset.id);
+    insertClientDocText(detail.extracted_text || detail.snippet || '');
+  }));
+}
+
+async function loadClientDocs(query = '') {
+  const res = await fetch(`/api/document-files/${docId}/?q=${encodeURIComponent(query || '')}`);
+  const data = await readApiPayload(res);
+  if (!res.ok) {
+    setClientDocStatus(data.error || 'Unable to load client documents.', 'error');
+    return;
+  }
+  renderClientDocResults(data.results || []);
+}
+
+async function getClientDocDetail(fileId) {
+  const res = await fetch(`/api/document-files/${docId}/${fileId}/`);
+  const data = await readApiPayload(res);
+  if (!res.ok) {
+    throw new Error(data.error || 'Unable to load that client document.');
+  }
+  return data;
+}
+
+async function openClientDoc(fileId) {
+  try {
+    const data = await getClientDocDetail(fileId);
+    currentClientDoc = data;
+    document.getElementById('client-doc-detail-panel').classList.remove('hidden');
+    const warning = data.metadata?.warning ? `<div class="text-xs text-yellow-700 mt-2">${escapeHtml(data.metadata.warning)}</div>` : '';
+    document.getElementById('client-doc-detail').innerHTML = `
+      <h4 class="font-semibold text-navy">${escapeHtml(data.title || '')}</h4>
+      <div class="text-xs text-gray-600">${escapeHtml(data.metadata?.filename || '')}</div>
+      ${warning}
+      <h5 class="mt-3 font-semibold text-xs text-gray-700">Extracted Text</h5>
+      <pre class="whitespace-pre-wrap text-xs bg-gray-50 p-2 rounded mt-1">${escapeHtml((data.extracted_text || '').slice(0, 30000))}</pre>`;
+  } catch (error) {
+    setClientDocStatus(error?.message || 'Unable to open that client document.', 'error');
+  }
+}
+
+function insertClientDocText(text) {
+  if (!text) return;
+  const excerpt = text.length > 1800 ? `${text.slice(0, 1800)}...` : text;
+  editor.chain().focus().insertContent(excerpt).run();
+}
 
 function exemplarCard(item) {
   return `<div class="border rounded p-2 bg-white hover:border-navy">
@@ -1869,6 +1979,41 @@ document.getElementById('insert-exemplar-text').addEventListener('click', () => 
   if (currentExemplar) insertExemplarText(currentExemplar.extracted_text || currentExemplar.snippet || '');
 });
 document.getElementById('exemplar-back').addEventListener('click', () => document.getElementById('exemplar-detail-panel').classList.add('hidden'));
+document.getElementById('insert-client-doc-text').addEventListener('click', () => {
+  if (currentClientDoc) insertClientDocText(currentClientDoc.extracted_text || currentClientDoc.snippet || '');
+});
+document.getElementById('client-doc-back').addEventListener('click', () => document.getElementById('client-doc-detail-panel').classList.add('hidden'));
+
+const clientDocForm = document.getElementById('client-doc-upload-form');
+clientDocForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const formData = new FormData();
+  const fileInput = document.getElementById('client-doc-file');
+  if (!fileInput.files.length) return;
+
+  formData.append('file', fileInput.files[0]);
+  formData.append('title', document.getElementById('client-doc-title').value);
+
+  const res = await fetch(`/api/document-files/${docId}/upload/`, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+    body: formData,
+  });
+  const data = await readApiPayload(res);
+
+  if (!res.ok) {
+    setClientDocStatus(data.error || 'Upload failed.', 'error');
+    return;
+  }
+
+  clientDocForm.reset();
+  setClientDocStatus('Client document uploaded. The agent can use it on the next run.', 'success');
+  await loadClientDocs(document.getElementById('client-doc-query').value);
+});
+
+document.getElementById('run-client-doc-search').addEventListener('click', () => {
+  loadClientDocs(document.getElementById('client-doc-query').value);
+});
 
 const exemplarForm = document.getElementById('exemplar-upload-form');
 exemplarForm.addEventListener('submit', async (e) => {

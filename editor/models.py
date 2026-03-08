@@ -123,6 +123,28 @@ class Exemplar(models.Model):
         return self.title
 
 
+class DocumentClientFile(models.Model):
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="client_files",
+    )
+    title = models.CharField(max_length=500)
+    original_file = models.FileField(upload_to="document_client_files/")
+    extracted_text = models.TextField(blank=True)
+    embedding = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    uploaded_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return self.title
+
+
 class DocumentResearchSession(models.Model):
     document = models.ForeignKey(
         Document, on_delete=models.CASCADE, related_name="research_sessions"

@@ -9,8 +9,9 @@ from urllib.parse import urlparse, urlunparse
 from django.utils import timezone
 
 from .document_text import clip_document_text, extract_plain_text
+from .document_file_service import rank_client_files
 from .exemplar_service import rank_exemplars
-from .models import DocumentResearchRun, Exemplar
+from .models import DocumentClientFile, DocumentResearchRun, Exemplar
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +96,18 @@ You work alongside the attorney inside a live drafting session.
 Research operating rules:
 1. Use the BIA Edge database tools first for legal authorities, holdings, statutes, regulations, policy sections, and validity checks.
 2. Use the knowledge-base tools for firm exemplars, prior briefs, and internal language only when the user is asking about internal style, phrasing, formatting, or prior work product.
-3. Use web search only when freshness matters, when the user explicitly asks for it, or when database tools do not answer the question.
-4. Do not invent citations, case names, statutes, regulations, policy sections, or quoted passages.
-5. Prefer precedential authorities in your legal analysis. If you mention unpublished decisions or non-precedential material, label that clearly.
-6. If the user asks you to search the database, actually use the database tools instead of answering from memory.
-7. If controlling authority is thin or uncertain, say so directly.
-8. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
-9. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
-10. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-11. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
-12. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
+3. Use the document client-file tools when factual support, biographical detail, chronology, exhibits, or source language from uploaded client documents would help answer the question.
+4. Use web search only when freshness matters, when the user explicitly asks for it, or when database tools do not answer the question.
+5. Do not invent citations, case names, statutes, regulations, policy sections, quoted passages, or facts from uploaded client files.
+6. Prefer precedential authorities in your legal analysis. If you mention unpublished decisions or non-precedential material, label that clearly.
+7. If the user asks you to search the database, actually use the database tools instead of answering from memory.
+8. If you rely on uploaded client documents for a factual statement or quote, retrieve the relevant client file first.
+9. If controlling authority is thin or uncertain, say so directly.
+10. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
+11. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
+12. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
+13. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
+14. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
 - Be direct, practical, and collaborative.
@@ -119,8 +122,8 @@ Your task is to suggest the best legal authorities for the user's selected passa
 Hard rules:
 1. Final suggested authorities must be verified through BIA Edge database tools.
 2. Prefer precedential cases, statutes, regulations, and published policy.
-3. Use web search or knowledge tools only for context; do not include web-only authorities in the final authority list.
-4. Do not invent any citation, holding, or proposition.
+3. Use uploaded client-document tools, web search, or knowledge tools only for context; do not include web-only authorities in the final authority list.
+4. Do not invent any citation, holding, proposition, or fact from uploaded client documents.
 5. If the selected text is vague or under-supported, explain the gap instead of bluffing.
 6. Return valid JSON only. No markdown fences, no prose outside the JSON object.
 7. Research efficiently. Start broad, then narrow to the best 2 to 5 authorities for this passage.
@@ -157,8 +160,8 @@ You work inside a live draft and may research before proposing a controlled edit
 
 Hard rules:
 1. Read the current document context and any selected text before proposing an edit.
-2. Use BIA Edge first for legal authorities. Use knowledge tools for internal style and prior work product. Use web search only when freshness matters or the user explicitly asks for it.
-3. Do not invent citations, quoted language, legal standards, or case support.
+2. Use BIA Edge first for legal authorities. Use knowledge tools for internal style and prior work product. Use document client-file tools for uploaded factual materials. Use web search only when freshness matters or the user explicitly asks for it.
+3. Do not invent citations, quoted language, legal standards, case support, or facts from uploaded client documents.
 4. Propose one concrete edit only. Do not rewrite the whole document unless the user explicitly asks for that and the operation is append_to_document.
 5. The final answer must be valid JSON only. No markdown fences and no prose outside the JSON object.
 6. proposed_text must be plain drafting text, preserving paragraph breaks but not markdown formatting.
@@ -475,6 +478,60 @@ def _get_exemplar_for_agent(*, user, exemplar_id: int):
     }
 
 
+def _search_client_files_for_agent(*, document, query: str, limit: int = 5):
+    normalized_query = (query or "").strip()
+    normalized_limit = max(1, min(int(limit or 5), 8))
+
+    items = []
+    for client_file in document.client_files.all()[:200]:
+        text = client_file.extracted_text or ""
+        items.append(
+            {
+                "id": client_file.id,
+                "title": client_file.title,
+                "filename": (client_file.metadata or {}).get("filename") or "",
+                "extension": (client_file.metadata or {}).get("extension") or "",
+                "updated_at": client_file.updated_at.isoformat(),
+                "snippet": text[:500],
+                "extracted_text": text[:5000],
+                "embedding": client_file.embedding or [],
+            }
+        )
+
+    ranked = rank_client_files(normalized_query, items)
+    return {
+        "results": [
+            {
+                "id": item["id"],
+                "title": item["title"],
+                "filename": item["filename"],
+                "extension": item["extension"],
+                "snippet": item["snippet"],
+                "score": round(float(item.get("score", 0.0) or 0.0), 4),
+            }
+            for item in ranked[:normalized_limit]
+        ]
+    }
+
+
+def _get_client_file_for_agent(*, document, file_id: int):
+    client_file = DocumentClientFile.objects.filter(
+        document=document,
+        id=file_id,
+    ).first()
+    if not client_file:
+        return {"error": "Client document not found."}
+
+    return {
+        "id": client_file.id,
+        "title": client_file.title,
+        "filename": (client_file.metadata or {}).get("filename") or "",
+        "extension": (client_file.metadata or {}).get("extension") or "",
+        "metadata": client_file.metadata or {},
+        "text": (client_file.extracted_text or "")[:12000],
+    }
+
+
 def _knowledge_function_tools() -> list[dict[str, Any]]:
     return [
         {
@@ -517,6 +574,49 @@ def _knowledge_function_tools() -> list[dict[str, Any]]:
                     }
                 },
                 "required": ["exemplar_id"],
+            },
+        },
+    ]
+
+
+def _client_file_function_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "name": "search_client_documents",
+            "description": "Search the uploaded client documents attached to the current draft for facts, chronology, names, exhibits, and source language.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for in the uploaded client documents.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many client-document search results to return. Use a small integer from 1 to 8.",
+                    },
+                },
+                "required": ["query", "limit"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "get_client_document",
+            "description": "Fetch the extracted text and metadata for a specific uploaded client document attached to the current draft.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_id": {
+                        "type": "integer",
+                        "description": "The client document ID returned by search_client_documents.",
+                    }
+                },
+                "required": ["file_id"],
             },
         },
     ]
@@ -982,6 +1082,9 @@ class DocumentResearchAgent:
         self.document = document
         self.user = user
         self.client = _new_openai_client()
+        self.has_client_files = DocumentClientFile.objects.filter(
+            document=document,
+        ).exists()
         self.has_active_exemplars = Exemplar.objects.filter(
             created_by=user,
             is_active=True,
@@ -1413,6 +1516,8 @@ class DocumentResearchAgent:
     def _build_tools(self, *, mode: str, include_mcp: bool = True) -> list[dict[str, Any]]:
         allowed_tools = _BIAEDGE_SUGGEST_TOOLS if mode == "suggest" else _BIAEDGE_CHAT_TOOLS
         tools = [_build_web_search_tool()]
+        if self.has_client_files:
+            tools.extend(_client_file_function_tools())
         if self.has_active_exemplars:
             tools.extend(_knowledge_function_tools())
         if include_mcp:
@@ -1865,14 +1970,22 @@ class DocumentResearchAgent:
                     name=getattr(call, "name", "") or "",
                     arguments=parsed_arguments,
                 )
+                tool_name = getattr(call, "name", "") or ""
+                tool_source = "knowledge"
+                if tool_name in {"search_client_documents", "get_client_document"}:
+                    tool_source = "client_docs"
+                record = {
+                    "source": tool_source,
+                    "type": "function_call",
+                    "name": tool_name,
+                    "status": "completed",
+                    "arguments": parsed_arguments,
+                }
+                output_excerpt = _compact_tool_output(result)
+                if output_excerpt:
+                    record["output_excerpt"] = output_excerpt
                 local_tool_calls.append(
-                    {
-                        "source": "knowledge",
-                        "type": "function_call",
-                        "name": getattr(call, "name", "") or "",
-                        "status": "completed",
-                        "arguments": parsed_arguments,
-                    }
+                    record
                 )
                 outputs.append(
                     {
@@ -2192,6 +2305,9 @@ class DocumentResearchAgent:
         ]
         if doc_slug:
             lines.append(f"- Document type slug: {doc_slug}")
+        client_file_count = self.document.client_files.count()
+        if client_file_count:
+            lines.append(f"- Uploaded client documents available: {client_file_count}")
         if selected_text:
             lines.extend(
                 [
@@ -2272,6 +2388,17 @@ class DocumentResearchAgent:
         return "\n".join(lines).strip()
 
     def _call_local_tool(self, *, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "search_client_documents":
+            return _search_client_files_for_agent(
+                document=self.document,
+                query=str(arguments.get("query") or ""),
+                limit=arguments.get("limit") or 5,
+            )
+        if name == "get_client_document":
+            return _get_client_file_for_agent(
+                document=self.document,
+                file_id=_coerce_int(arguments.get("file_id")) or 0,
+            )
         if name == "search_exemplars":
             return _search_exemplars_for_agent(
                 user=self.user,

@@ -17,6 +17,7 @@ from .agent_service import (
     AGENT_FINALIZATION_REASONING_EFFORT,
     AgentConfigurationError,
     DocumentResearchAgent,
+    _client_file_function_tools,
     _extract_output_text,
     _extract_hosted_tool_calls,
     _knowledge_function_tools,
@@ -28,6 +29,7 @@ from .agent_service import (
 from .import_service import import_docx_to_tiptap
 from .models import (
     Document,
+    DocumentClientFile,
     DocumentResearchMessage,
     DocumentResearchRun,
     DocumentResearchSession,
@@ -567,6 +569,33 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(snapshot.content, current_content)
         self.assertTrue(snapshot.label.startswith("Before agent edit - Strengthen nexus paragraph"))
 
+    def test_client_document_upload_and_list_for_current_document(self):
+        upload = SimpleUploadedFile(
+            "police-report.txt",
+            b"On March 1, 2024, the client reported the threats to police.",
+            content_type="text/plain",
+        )
+
+        upload_response = self.client.post(
+            reverse("document_client_file_upload", kwargs={"doc_id": self.document.id}),
+            data={"file": upload, "title": "Police Report"},
+        )
+
+        self.assertEqual(upload_response.status_code, 200)
+        payload = upload_response.json()["client_file"]
+        self.assertEqual(payload["title"], "Police Report")
+        self.assertIn("reported the threats", payload["extracted_text"])
+
+        list_response = self.client.get(
+            reverse("document_client_file_list", kwargs={"doc_id": self.document.id}),
+            data={"q": "police"},
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        results = list_response.json()["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Police Report")
+
 
 class AgentServiceTests(TestCase):
     def setUp(self):
@@ -600,6 +629,16 @@ class AgentServiceTests(TestCase):
             sorted(search_schema["required"]),
         )
 
+        client_doc_schema = {
+            tool["name"]: tool
+            for tool in _client_file_function_tools()
+        }["search_client_documents"]["parameters"]
+        self.assertEqual(client_doc_schema["required"], ["query", "limit"])
+        self.assertEqual(
+            sorted(client_doc_schema["properties"].keys()),
+            sorted(client_doc_schema["required"]),
+        )
+
     @patch("editor.agent_service._new_openai_client")
     def test_build_tools_omits_knowledge_functions_without_active_exemplars(self, new_client):
         agent = DocumentResearchAgent(
@@ -610,6 +649,27 @@ class AgentServiceTests(TestCase):
         tools = agent._build_tools(mode="chat", include_mcp=False)
 
         self.assertFalse(any(tool.get("type") == "function" for tool in tools))
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_build_tools_includes_client_document_functions_when_current_document_has_uploads(self, new_client):
+        DocumentClientFile.objects.create(
+            document=self.document,
+            title="Police Report",
+            original_file=SimpleUploadedFile("police-report.txt", b"Client reported the extortion to police."),
+            extracted_text="Client reported the extortion to police.",
+            uploaded_by=self.user,
+            metadata={"filename": "police-report.txt", "extension": ".txt"},
+        )
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+
+        tools = agent._build_tools(mode="chat", include_mcp=False)
+        function_names = sorted(tool.get("name") for tool in tools if tool.get("type") == "function")
+
+        self.assertIn("search_client_documents", function_names)
+        self.assertIn("get_client_document", function_names)
 
     @patch("editor.agent_service._new_openai_client")
     def test_run_response_loop_forces_final_answer_after_tool_only_round(self, new_client):

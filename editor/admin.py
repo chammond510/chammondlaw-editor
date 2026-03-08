@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     DocumentType,
     Document,
+    DocumentClientFile,
     DocumentVersion,
     Exemplar,
     DocumentResearchSession,
@@ -25,6 +26,13 @@ class DocumentAdmin(admin.ModelAdmin):
 @admin.register(DocumentVersion)
 class DocumentVersionAdmin(admin.ModelAdmin):
     list_display = ["document", "label", "created_at"]
+
+
+@admin.register(DocumentClientFile)
+class DocumentClientFileAdmin(admin.ModelAdmin):
+    list_display = ["title", "document", "uploaded_by", "updated_at"]
+    list_filter = ["updated_at"]
+    search_fields = ["title", "document__title", "extracted_text"]
 
 
 @admin.register(Exemplar)

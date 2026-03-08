@@ -1,6 +1,6 @@
 from django.urls import path
 from django.contrib.auth import views as auth_views
-from . import agent_views, views, research_views, exemplar_views
+from . import agent_views, document_file_views, views, research_views, exemplar_views
 
 urlpatterns = [
     # Auth
@@ -55,6 +55,13 @@ urlpatterns = [
     path("api/research/case/<int:doc_id>/", research_views.case_detail, name="research_case"),
     path("api/research/similar/<int:doc_id>/", research_views.similar_cases, name="research_similar"),
     path("api/research/immcite/<int:doc_id>/", research_views.immcite_status, name="research_immcite"),
+    path("api/document-files/<uuid:doc_id>/", document_file_views.client_file_list, name="document_client_file_list"),
+    path("api/document-files/<uuid:doc_id>/upload/", document_file_views.client_file_upload, name="document_client_file_upload"),
+    path(
+        "api/document-files/<uuid:doc_id>/<int:file_id>/",
+        document_file_views.client_file_detail,
+        name="document_client_file_detail",
+    ),
     # Exemplar API
     path("api/exemplars/upload/", exemplar_views.exemplar_upload, name="exemplar_upload"),
     path("api/exemplars/search/", exemplar_views.exemplar_search, name="exemplar_search"),
