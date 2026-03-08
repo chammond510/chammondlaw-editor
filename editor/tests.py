@@ -18,6 +18,7 @@ from .agent_service import (
     AgentConfigurationError,
     DocumentResearchAgent,
     _client_file_function_tools,
+    _extract_json_object,
     _extract_output_text,
     _extract_hosted_tool_calls,
     _knowledge_function_tools,
@@ -1051,6 +1052,22 @@ class AgentServiceTests(TestCase):
 
         self.assertEqual(normalized["operation"], "replace_selection")
         self.assertEqual(normalized["target_text"], "Original introduction paragraph.")
+
+    def test_extract_json_object_allows_control_characters_inside_strings(self):
+        raw = (
+            '{"edit_summary":"Replace the argument section.",'
+            '"rationale":"Improve substance.",'
+            '"operation":"replace_selection",'
+            '"target_text":"II. Argument\tFirst, the documentary evidence...",'
+            '"proposed_text":"Revised argument text.",'
+            '"notes":""}'
+        )
+
+        parsed = _extract_json_object(raw)
+
+        self.assertIsInstance(parsed, dict)
+        self.assertEqual(parsed["operation"], "replace_selection")
+        self.assertIn("II. Argument", parsed["target_text"])
 
     @patch("editor.agent_service._new_openai_client")
     def test_queue_json_repair_salvages_plain_text_edit_response(self, new_client):

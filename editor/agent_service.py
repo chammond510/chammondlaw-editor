@@ -364,6 +364,11 @@ def _safe_json_loads(raw: Any, default=None):
     try:
         return json.loads(raw)
     except Exception:
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw, strict=False)
+            except Exception:
+                return default
         return default
 
 
@@ -1354,6 +1359,12 @@ def _fallback_edit_result_from_text(raw_answer: str, *, request_payload: dict[st
     cleaned = _strip_markdown_fences(raw_answer)
     if not cleaned:
         return {}
+
+    json_like_payload = _safe_json_loads(cleaned, default=None)
+    if isinstance(json_like_payload, dict):
+        normalized = _normalize_edit_result(json_like_payload, request_payload=request_payload)
+        if normalized.get("operation") == "delete_selection" or normalized.get("proposed_text"):
+            return normalized
 
     sections: dict[str, str] = {}
     matches = list(_EDIT_FALLBACK_SECTION_RE.finditer(cleaned))
