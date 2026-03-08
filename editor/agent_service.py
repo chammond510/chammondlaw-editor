@@ -85,10 +85,14 @@ _CHAT_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_MAX_CH
 _CHAT_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_TAIL_CHARS", "3000"))
 _SUGGEST_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_MAX_CHARS", "16000"))
 _SUGGEST_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_SUGGEST_DOCUMENT_TAIL_CHARS", "4000"))
+_EDIT_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_EDIT_DOCUMENT_MAX_CHARS", "8000"))
+_EDIT_DOCUMENT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_EDIT_DOCUMENT_TAIL_CHARS", "2000"))
 _TOOL_OUTPUT_EXCERPT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_OUTPUT_EXCERPT_MAX_CHARS", "1200"))
 _TOOL_OUTPUT_EXCERPT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_OUTPUT_EXCERPT_TAIL_CHARS", "240"))
 _TOOL_RESULT_DIGEST_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_TOOL_RESULT_DIGEST_MAX_CHARS", "12000"))
 _TOOL_RESULT_DIGEST_MAX_ITEMS = int(os.environ.get("OPENAI_AGENT_TOOL_RESULT_DIGEST_MAX_ITEMS", "12"))
+_LOCAL_TOOL_TEXT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_LOCAL_TOOL_TEXT_MAX_CHARS", "6000"))
+_LOCAL_TOOL_TEXT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_LOCAL_TOOL_TEXT_TAIL_CHARS", "1200"))
 
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
@@ -475,7 +479,11 @@ def _get_exemplar_for_agent(*, user, exemplar_id: int):
         "outcome": exemplar.outcome,
         "tags": exemplar.tags or [],
         "metadata": exemplar.metadata or {},
-        "text": (exemplar.extracted_text or "")[:8000],
+        "text": clip_document_text(
+            exemplar.extracted_text or "",
+            max_chars=_LOCAL_TOOL_TEXT_MAX_CHARS,
+            tail_chars=min(_LOCAL_TOOL_TEXT_TAIL_CHARS, _LOCAL_TOOL_TEXT_MAX_CHARS),
+        ),
     }
 
 
@@ -529,7 +537,11 @@ def _get_client_file_for_agent(*, document, file_id: int):
         "filename": (client_file.metadata or {}).get("filename") or "",
         "extension": (client_file.metadata or {}).get("extension") or "",
         "metadata": client_file.metadata or {},
-        "text": (client_file.extracted_text or "")[:12000],
+        "text": clip_document_text(
+            client_file.extracted_text or "",
+            max_chars=_LOCAL_TOOL_TEXT_MAX_CHARS,
+            tail_chars=min(_LOCAL_TOOL_TEXT_TAIL_CHARS, _LOCAL_TOOL_TEXT_MAX_CHARS),
+        ),
     }
 
 
@@ -1280,6 +1292,9 @@ class DocumentResearchAgent:
 
         budget_error = self._budget_error(run)
         if budget_error:
+            recovered = self._recover_budget_overrun(run=run, reason=budget_error)
+            if recovered:
+                return recovered
             self.cancel_run(run=run, reason=budget_error, final_status="failed")
             return run
 
@@ -1303,6 +1318,9 @@ class DocumentResearchAgent:
         self._record_response_artifacts(run, response)
         budget_error = self._budget_error(run)
         if budget_error:
+            recovered = self._recover_budget_overrun(run=run, reason=budget_error)
+            if recovered:
+                return recovered
             self.cancel_run(run=run, reason=budget_error, final_status="failed")
             return run
 
@@ -1868,6 +1886,12 @@ class DocumentResearchAgent:
         return message
 
     def _budget_error(self, run: DocumentResearchRun) -> str:
+        if bool((run.metadata or {}).get("allow_over_budget_finalization")) and run.stage in {
+            "forcing_final",
+            "recovering_failure",
+            "repairing_json",
+        }:
+            return ""
         elapsed_seconds = max(0, int((timezone.now() - run.created_at).total_seconds()))
         if elapsed_seconds > AGENT_MAX_RUN_SECONDS:
             return f"The agent run exceeded the {AGENT_MAX_RUN_SECONDS}-second budget."
@@ -1886,6 +1910,48 @@ class DocumentResearchAgent:
         if int(usage.get("reasoning_tokens") or 0) > AGENT_MAX_REASONING_TOKENS:
             return f"The agent run exceeded the reasoning token budget of {AGENT_MAX_REASONING_TOKENS}."
         return ""
+
+    def _recover_budget_overrun(
+        self,
+        *,
+        run: DocumentResearchRun,
+        reason: str,
+    ) -> DocumentResearchRun | None:
+        normalized_reason = (reason or "").strip().lower()
+        if not normalized_reason:
+            return None
+        if "second budget" in normalized_reason:
+            return None
+        metadata = dict(run.metadata or {})
+        if metadata.get("budget_recovery_attempted"):
+            return None
+        if not (run.tool_calls or []):
+            return None
+
+        metadata["budget_recovery_attempted"] = True
+        metadata["allow_over_budget_finalization"] = True
+        metadata["budget_recovery_reason"] = reason
+        run.metadata = metadata
+        compact_input = self._finalization_input_from_run(run=run)
+        try:
+            follow_up = self._create_background_response(
+                instructions=(
+                    self._run_instructions(run)
+                    + "\n\nThe run has reached its budget threshold. "
+                    + "Using only the verified research already gathered, provide the final answer now. "
+                    + "Do not call any more tools."
+                ),
+                input_payload=compact_input,
+                tools=[],
+                previous_response_id=None,
+                tool_choice="none",
+                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
+            )
+        except AgentExecutionError:
+            return None
+        return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
 
     def _recover_failed_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun | None:
         metadata = dict(run.metadata or {})
@@ -2327,6 +2393,9 @@ class DocumentResearchAgent:
         if mode == "suggest":
             max_chars = _SUGGEST_DOCUMENT_MAX_CHARS
             tail_chars = _SUGGEST_DOCUMENT_TAIL_CHARS
+        elif mode == "edit":
+            max_chars = _EDIT_DOCUMENT_MAX_CHARS
+            tail_chars = _EDIT_DOCUMENT_TAIL_CHARS
         else:
             max_chars = _CHAT_DOCUMENT_MAX_CHARS
             tail_chars = _CHAT_DOCUMENT_TAIL_CHARS

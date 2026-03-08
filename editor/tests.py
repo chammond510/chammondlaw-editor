@@ -733,6 +733,48 @@ class AgentServiceTests(TestCase):
             self.assertEqual(agent._budget_error(run), "")
 
     @patch("editor.agent_service._new_openai_client")
+    def test_total_token_budget_queues_compact_finalization_instead_of_failing(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="running_tools",
+            response_id="resp_budgeted",
+            usage={"total_tokens": 130},
+            tool_calls=[
+                {
+                    "source": "client_docs",
+                    "type": "function_call",
+                    "name": "get_client_document",
+                    "status": "completed",
+                    "arguments": {"file_id": 1},
+                    "output_excerpt": '{"text":"Client states the officer requested the waiver at the interview."}',
+                }
+            ],
+            metadata=agent._initial_run_metadata(mode="edit", previous_response_id=""),
+        )
+        queued_response = SimpleNamespace(id="resp_final_budget", status="queued", error=None, usage=None, output=[])
+
+        with patch("editor.agent_service.AGENT_MAX_TOTAL_TOKENS", 120):
+            with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+                updated = agent.advance_run(run=run)
+
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.stage, "forcing_final")
+        self.assertEqual(updated.response_id, "resp_final_budget")
+        self.assertTrue(updated.metadata.get("budget_recovery_attempted"))
+        self.assertTrue(updated.metadata.get("allow_over_budget_finalization"))
+        request = create_background.call_args.kwargs
+        self.assertEqual(request["tools"], [])
+        self.assertEqual(request["tool_choice"], "none")
+        self.assertIn("verified research already gathered", request["instructions"].lower())
+
+    @patch("editor.agent_service._new_openai_client")
     def test_run_response_loop_forces_final_answer_after_tool_only_round(self, new_client):
         agent = DocumentResearchAgent(
             document=self.document,
