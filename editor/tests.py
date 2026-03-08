@@ -745,6 +745,25 @@ class AgentServiceTests(TestCase):
             self.assertEqual(agent._budget_error(run), "")
 
     @patch("editor.agent_service._new_openai_client")
+    def test_budget_error_does_not_use_response_or_reasoning_caps(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_count=99,
+            usage={"reasoning_tokens": 999999, "total_tokens": 100},
+            metadata=agent._initial_run_metadata(mode="chat", previous_response_id=""),
+        )
+
+        self.assertEqual(agent._budget_error(run), "")
+
+    @patch("editor.agent_service._new_openai_client")
     def test_total_token_budget_queues_compact_finalization_instead_of_failing(self, new_client):
         agent = DocumentResearchAgent(
             document=self.document,
@@ -1117,7 +1136,8 @@ class AgentServiceTests(TestCase):
         )
 
         agent.client.responses.retrieve = lambda *args, **kwargs: failed_response
-        updated = agent.advance_run(run=run)
+        with patch("editor.agent_service.AGENT_MAX_TOOL_CALLS", 24):
+            updated = agent.advance_run(run=run)
 
         self.assertEqual(updated.status, "failed")
         self.assertIn("tool-call budget", updated.error_message)

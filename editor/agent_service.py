@@ -17,19 +17,17 @@ logger = logging.getLogger(__name__)
 
 AGENT_MODEL = os.environ.get("OPENAI_AGENT_MODEL", "gpt-5.4")
 AGENT_REASONING_EFFORT = os.environ.get("OPENAI_AGENT_REASONING_EFFORT", "high").strip().lower() or "high"
-AGENT_MAX_TOOL_CALLS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_CALLS", "24"))
-AGENT_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_TOKENS", "1800"))
+AGENT_MAX_TOOL_CALLS = int(os.environ.get("OPENAI_AGENT_MAX_TOOL_CALLS", "36"))
+AGENT_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_TOKENS", "2400"))
 AGENT_HTTP_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AGENT_HTTP_TIMEOUT_SECONDS", "25"))
-AGENT_MAX_RUN_SECONDS = int(os.environ.get("OPENAI_AGENT_MAX_RUN_SECONDS", "300"))
-AGENT_MAX_RESPONSES_PER_RUN = int(os.environ.get("OPENAI_AGENT_MAX_RESPONSES_PER_RUN", "8"))
-AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "8"))
-AGENT_MAX_TOTAL_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_TOTAL_TOKENS", "120000"))
-AGENT_MAX_REASONING_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_REASONING_TOKENS", "40000"))
+AGENT_MAX_RUN_SECONDS = int(os.environ.get("OPENAI_AGENT_MAX_RUN_SECONDS", "480"))
+AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "12"))
+AGENT_MAX_TOTAL_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_TOTAL_TOKENS", "180000"))
 AGENT_FINALIZATION_REASONING_EFFORT = (
     os.environ.get("OPENAI_AGENT_FINALIZATION_REASONING_EFFORT", "low").strip().lower() or "low"
 )
 AGENT_FINALIZATION_MAX_OUTPUT_TOKENS = int(
-    os.environ.get("OPENAI_AGENT_FINALIZATION_MAX_OUTPUT_TOKENS", "900")
+    os.environ.get("OPENAI_AGENT_FINALIZATION_MAX_OUTPUT_TOKENS", "1400")
 )
 AGENT_JSON_REPAIR_REASONING_EFFORT = (
     os.environ.get("OPENAI_AGENT_JSON_REPAIR_REASONING_EFFORT", "none").strip().lower() or "none"
@@ -77,8 +75,8 @@ _TOOL_INCLUDE_FIELDS = [
 ]
 _CHAT_TRANSCRIPT_LIMIT = 12
 _MAX_FUNCTION_ROUNDS = 8
-_JSON_REPAIR_MAX_OUTPUT_TOKENS = 1200
-_CONTINUE_RESPONSE_MAX_OUTPUT_TOKENS = 900
+_JSON_REPAIR_MAX_OUTPUT_TOKENS = 1600
+_CONTINUE_RESPONSE_MAX_OUTPUT_TOKENS = 1400
 _ACTIVE_RUN_STATUSES = {"queued", "in_progress"}
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 _CHAT_DOCUMENT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_CHAT_DOCUMENT_MAX_CHARS", "12000"))
@@ -2221,8 +2219,6 @@ class DocumentResearchAgent:
         elapsed_seconds = max(0, int((timezone.now() - run.created_at).total_seconds()))
         if elapsed_seconds > AGENT_MAX_RUN_SECONDS:
             return f"The agent run exceeded the {AGENT_MAX_RUN_SECONDS}-second budget."
-        if int(run.response_count or 0) > AGENT_MAX_RESPONSES_PER_RUN:
-            return f"The agent run exceeded the response budget of {AGENT_MAX_RESPONSES_PER_RUN} OpenAI responses."
         if int(run.local_function_rounds or 0) > AGENT_MAX_LOCAL_FUNCTION_ROUNDS:
             if bool((run.metadata or {}).get("allow_over_budget_finalization")):
                 return ""
@@ -2233,8 +2229,6 @@ class DocumentResearchAgent:
         usage = run.usage or {}
         if int(usage.get("total_tokens") or 0) > AGENT_MAX_TOTAL_TOKENS:
             return f"The agent run exceeded the total token budget of {AGENT_MAX_TOTAL_TOKENS}."
-        if int(usage.get("reasoning_tokens") or 0) > AGENT_MAX_REASONING_TOKENS:
-            return f"The agent run exceeded the reasoning token budget of {AGENT_MAX_REASONING_TOKENS}."
         return ""
 
     def _queue_compact_finalization(
