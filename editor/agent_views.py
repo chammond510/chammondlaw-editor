@@ -36,6 +36,7 @@ def _serialize_run(run, *, include_result=False):
         "mode": run.mode,
         "status": run.status,
         "stage": run.stage,
+        "phase": (run.metadata or {}).get("phase") or run.stage,
         "error_message": run.error_message,
         "response_id": run.response_id,
         "response_count": run.response_count,
@@ -91,18 +92,24 @@ def _get_active_run(session):
 def _mark_run_start_failure(run, message):
     run.status = "failed"
     run.stage = "failed"
+    metadata = dict(run.metadata or {})
+    metadata["phase"] = "failed"
+    run.metadata = metadata
     run.error_message = (message or "The agent run failed to start.").strip()
     run.completed_at = timezone.now()
-    run.save(update_fields=["status", "stage", "error_message", "completed_at", "updated_at"])
+    run.save(update_fields=["status", "stage", "metadata", "error_message", "completed_at", "updated_at"])
     return run
 
 
 def _cancel_run_without_agent(run, reason):
     run.status = "cancelled"
     run.stage = "cancelled"
+    metadata = dict(run.metadata or {})
+    metadata["phase"] = "cancelled"
+    run.metadata = metadata
     run.error_message = (reason or "The agent run was cancelled.").strip()
     run.completed_at = timezone.now()
-    run.save(update_fields=["status", "stage", "error_message", "completed_at", "updated_at"])
+    run.save(update_fields=["status", "stage", "metadata", "error_message", "completed_at", "updated_at"])
     return run
 
 

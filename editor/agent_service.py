@@ -94,6 +94,30 @@ _TOOL_RESULT_DIGEST_MAX_ITEMS = int(os.environ.get("OPENAI_AGENT_TOOL_RESULT_DIG
 _LOCAL_TOOL_TEXT_MAX_CHARS = int(os.environ.get("OPENAI_AGENT_LOCAL_TOOL_TEXT_MAX_CHARS", "6000"))
 _LOCAL_TOOL_TEXT_TAIL_CHARS = int(os.environ.get("OPENAI_AGENT_LOCAL_TOOL_TEXT_TAIL_CHARS", "1200"))
 
+_RUN_PHASE_INTAKE = "intake"
+_RUN_PHASE_RESEARCH = "research"
+_RUN_PHASE_VERIFY = "verify"
+_RUN_PHASE_FINALIZE = "finalize"
+_RUN_PHASE_PERSIST = "persist"
+_RUN_PHASE_COMPLETED = "completed"
+_RUN_PHASE_FAILED = "failed"
+_RUN_PHASE_CANCELLED = "cancelled"
+
+_STAGE_TO_PHASE = {
+    "queued": _RUN_PHASE_INTAKE,
+    "waiting_openai": _RUN_PHASE_RESEARCH,
+    "running_tools": _RUN_PHASE_RESEARCH,
+    "continuing": _RUN_PHASE_FINALIZE,
+    "verifying_quotes": _RUN_PHASE_VERIFY,
+    "forcing_final": _RUN_PHASE_FINALIZE,
+    "recovering_failure": _RUN_PHASE_FINALIZE,
+    "repairing_json": _RUN_PHASE_FINALIZE,
+    "persisting": _RUN_PHASE_PERSIST,
+    "completed": _RUN_PHASE_COMPLETED,
+    "failed": _RUN_PHASE_FAILED,
+    "cancelled": _RUN_PHASE_CANCELLED,
+}
+
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
 
@@ -111,7 +135,7 @@ Research operating rules:
 11. Use search_client_documents or search_exemplars first, then retrieve only the one or two files you actually need.
 12. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 13. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-14. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
+14. Honor the Turn requirements JSON block in the input. If it requires exact quotes or full-text verification, complete that before answering.
 15. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
@@ -134,7 +158,7 @@ Hard rules:
 7. Research efficiently. Start broad, then narrow to the best 2 to 5 authorities for this passage.
 8. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 9. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-10. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before drafting any quoted pinpoint.
+10. Honor the Turn requirements JSON block in the input. If it requires exact quotes or full-text verification, complete that before drafting any quoted pinpoint.
 11. Once you have enough verified authority to support the selection, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
@@ -172,7 +196,7 @@ Hard rules:
 6. proposed_text must be plain drafting text, preserving paragraph breaks but not markdown formatting.
 7. If selected text was provided, use it as the target for replace_selection, insert_after_selection, or delete_selection.
 8. If no selected text was provided, do not use replace_selection, insert_after_selection, or delete_selection. Use append_to_document instead.
-9. Honor the Turn requirements block in the input. If exact quotes are required, verify them before drafting the edit.
+9. Honor the Turn requirements JSON block in the input. If exact quotes are required, verify them before drafting the edit.
 10. Once you have enough verified support to propose the edit, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
@@ -764,31 +788,67 @@ def _request_requirements(text: str) -> dict[str, Any]:
     }
 
 
-def _request_requirements_block(text: str) -> str:
-    requirements = _request_requirements(text)
-    if not requirements["requires_exact_quotes"]:
-        return ""
+def _stage_phase(stage: str) -> str:
+    normalized = (stage or "").strip().lower()
+    return _STAGE_TO_PHASE.get(normalized, _RUN_PHASE_RESEARCH)
 
-    labels = [
-        _FULL_TEXT_SOURCE_LABELS.get(source, source)
-        for source in requirements["required_full_text_sources"]
-    ]
-    rules = [
-        _FULL_TEXT_SOURCE_TOOL_RULES[source]
-        for source in requirements["required_full_text_sources"]
-        if source in _FULL_TEXT_SOURCE_TOOL_RULES
-    ]
-    lines = [
-        "Turn requirements:",
-        "- requires_exact_quotes: yes",
-        f"- required_full_text_sources: {', '.join(labels)}",
-    ]
-    if rules:
-        lines.append(f"- required_tool_sequence: {'; '.join(rules)}")
-    lines.append(
-        "- finalization_rule: do not claim exact quoted text unless the relevant full-text tool was used in this turn"
-    )
-    return "\n".join(lines)
+
+def _make_turn_requirements(
+    *,
+    mode: str,
+    request_text: str,
+    selected_text: str = "",
+    has_client_files: bool = False,
+    has_active_exemplars: bool = False,
+) -> dict[str, Any]:
+    requirements = _request_requirements(request_text)
+    output_format = {
+        "suggest": "suggest_json",
+        "edit": "edit_json",
+    }.get(mode, "chat_text")
+    return {
+        "mode": mode,
+        "output_format": output_format,
+        "requires_exact_quotes": bool(requirements["requires_exact_quotes"]),
+        "required_full_text_sources": list(requirements["required_full_text_sources"]),
+        "required_tool_sequence": [
+            _FULL_TEXT_SOURCE_TOOL_RULES[source]
+            for source in requirements["required_full_text_sources"]
+            if source in _FULL_TEXT_SOURCE_TOOL_RULES
+        ],
+        "has_selected_text": bool((selected_text or "").strip()),
+        "client_documents_available": bool(has_client_files),
+        "knowledge_available": bool(has_active_exemplars),
+        "web_search_policy": "freshness_or_user_request_only",
+        "primary_authority_source": "biaedge",
+        "finalization_rule": (
+            "Do not claim exact quoted text unless the relevant full-text tool was used in this turn."
+        ),
+    }
+
+
+def _request_requirements_block(text: str) -> str:
+    requirements = _make_turn_requirements(mode="chat", request_text=text)
+    return _turn_requirements_block(requirements)
+
+
+def _turn_requirements_block(requirements: dict[str, Any]) -> str:
+    if not isinstance(requirements, dict):
+        return ""
+    payload = {
+        "mode": str(requirements.get("mode") or "").strip(),
+        "output_format": str(requirements.get("output_format") or "").strip(),
+        "requires_exact_quotes": bool(requirements.get("requires_exact_quotes")),
+        "required_full_text_sources": list(requirements.get("required_full_text_sources") or []),
+        "required_tool_sequence": list(requirements.get("required_tool_sequence") or []),
+        "has_selected_text": bool(requirements.get("has_selected_text")),
+        "client_documents_available": bool(requirements.get("client_documents_available")),
+        "knowledge_available": bool(requirements.get("knowledge_available")),
+        "web_search_policy": str(requirements.get("web_search_policy") or "").strip(),
+        "primary_authority_source": str(requirements.get("primary_authority_source") or "").strip(),
+        "finalization_rule": str(requirements.get("finalization_rule") or "").strip(),
+    }
+    return "Turn requirements JSON:\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
 
 
 def _extract_citations(response: Any) -> list[dict[str, Any]]:
@@ -907,6 +967,108 @@ def _tool_result_digest(tool_calls: list[dict[str, Any]]) -> str:
             break
 
     return "\n\n".join(blocks).strip()
+
+
+def _build_evidence_pack(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    pack = {
+        "legal_authorities": [],
+        "client_documents": [],
+        "knowledge": [],
+        "web": [],
+        "errors": [],
+    }
+    counts = {key: 0 for key in pack}
+
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+
+        source = str(item.get("source") or "").strip()
+        name = str(item.get("name") or "").strip()
+        excerpt = str(item.get("output_excerpt") or "").strip()
+        error = str(item.get("error") or "").strip()
+        arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+        record = {
+            "source": source,
+            "tool": name,
+        }
+        if arguments:
+            record["args"] = {
+                key: value
+                for key, value in arguments.items()
+                if key in {"query", "document_id", "reference_id", "source_code", "limit", "file_id", "exemplar_id"}
+                and value not in ("", None, [], {})
+            }
+        if excerpt:
+            record["excerpt"] = excerpt
+        if error:
+            record["error"] = error[:500]
+
+        bucket = None
+        if error and not excerpt:
+            bucket = "errors"
+        elif source == "biaedge":
+            bucket = "legal_authorities"
+        elif source == "client_docs":
+            bucket = "client_documents"
+        elif source == "knowledge":
+            bucket = "knowledge"
+        elif source == "web":
+            bucket = "web"
+
+        if not bucket:
+            continue
+        counts[bucket] += 1
+        if len(pack[bucket]) < 4:
+            pack[bucket].append(record)
+
+    pack["counts"] = counts
+    return pack
+
+
+def _evidence_pack_text(pack: dict[str, Any]) -> str:
+    if not isinstance(pack, dict):
+        return ""
+
+    section_order = [
+        ("legal_authorities", "Legal authorities"),
+        ("client_documents", "Client documents"),
+        ("knowledge", "Knowledge and exemplars"),
+        ("web", "Web search"),
+        ("errors", "Tool issues"),
+    ]
+    lines: list[str] = []
+    total_chars = 0
+
+    for key, label in section_order:
+        items = pack.get(key) or []
+        if not isinstance(items, list) or not items:
+            continue
+        lines.append(f"{label}:")
+        total_chars += len(lines[-1])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            parts = [f"- {item.get('tool', 'tool')}"]
+            args = item.get("args") if isinstance(item.get("args"), dict) else {}
+            if args:
+                try:
+                    parts.append(f"args={json.dumps(args, ensure_ascii=False, sort_keys=True)}")
+                except Exception:
+                    parts.append(f"args={args}")
+            excerpt = str(item.get("excerpt") or "").strip()
+            if excerpt:
+                parts.append(f"excerpt={excerpt}")
+            error = str(item.get("error") or "").strip()
+            if error:
+                parts.append(f"error={error}")
+            line = " | ".join(parts)
+            if total_chars and total_chars + len(line) > _TOOL_RESULT_DIGEST_MAX_CHARS:
+                return "\n".join(lines).strip()
+            lines.append(line)
+            total_chars += len(line)
+
+    return "\n".join(lines).strip()
 
 
 def _pending_function_calls(response: Any) -> list[Any]:
@@ -1125,6 +1287,15 @@ class DocumentResearchAgent:
         }
         run.previous_response_id = (previous_response_id or "").strip()
         run.metadata = self._initial_run_metadata(mode="chat", previous_response_id=run.previous_response_id)
+        metadata = dict(run.metadata or {})
+        metadata["requirements"] = _make_turn_requirements(
+            mode="chat",
+            request_text=normalized_message,
+            selected_text=normalized_selection,
+            has_client_files=self.has_client_files,
+            has_active_exemplars=self.has_active_exemplars,
+        )
+        run.metadata = metadata
 
         used_mcp_fallback = False
         try:
@@ -1211,7 +1382,12 @@ class DocumentResearchAgent:
         metadata = dict(run.metadata or {})
         metadata["mcp_fallback"] = used_mcp_fallback
         run.metadata = metadata
-        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+        return self._attach_started_response(
+            run=run,
+            response=response,
+            stage="waiting_openai",
+            phase=_RUN_PHASE_RESEARCH,
+        )
 
     def start_suggest_run(
         self,
@@ -1231,6 +1407,15 @@ class DocumentResearchAgent:
         }
         run.previous_response_id = ""
         run.metadata = self._initial_run_metadata(mode="suggest", previous_response_id="")
+        metadata = dict(run.metadata or {})
+        metadata["requirements"] = _make_turn_requirements(
+            mode="suggest",
+            request_text=(focus_note or "").strip(),
+            selected_text=normalized_selected,
+            has_client_files=self.has_client_files,
+            has_active_exemplars=self.has_active_exemplars,
+        )
+        run.metadata = metadata
 
         response = self._create_background_response(
             instructions=_SUGGEST_SYSTEM_PROMPT,
@@ -1244,7 +1429,12 @@ class DocumentResearchAgent:
             max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
             mode="suggest",
         )
-        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+        return self._attach_started_response(
+            run=run,
+            response=response,
+            stage="waiting_openai",
+            phase=_RUN_PHASE_RESEARCH,
+        )
 
     def start_edit_run(
         self,
@@ -1269,6 +1459,15 @@ class DocumentResearchAgent:
         }
         run.previous_response_id = ""
         run.metadata = self._initial_run_metadata(mode="edit", previous_response_id="")
+        metadata = dict(run.metadata or {})
+        metadata["requirements"] = _make_turn_requirements(
+            mode="edit",
+            request_text=normalized_instruction,
+            selected_text=normalized_selected,
+            has_client_files=self.has_client_files,
+            has_active_exemplars=self.has_active_exemplars,
+        )
+        run.metadata = metadata
 
         response = self._create_background_response(
             instructions=_EDIT_SYSTEM_PROMPT,
@@ -1282,7 +1481,12 @@ class DocumentResearchAgent:
             max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
             mode="edit",
         )
-        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+        return self._attach_started_response(
+            run=run,
+            response=response,
+            stage="waiting_openai",
+            phase=_RUN_PHASE_RESEARCH,
+        )
 
     def advance_run(self, *, run: DocumentResearchRun) -> DocumentResearchRun:
         if run.status in _TERMINAL_RUN_STATUSES:
@@ -1551,6 +1755,7 @@ class DocumentResearchAgent:
             "model": AGENT_MODEL,
             "reasoning_effort": AGENT_REASONING_EFFORT,
             "mcp_fallback": False,
+            "phase": _RUN_PHASE_INTAKE,
             "used_previous_response_id": bool(previous_response_id),
             "forced_final_attempted": False,
             "json_repair_attempted": False,
@@ -1558,6 +1763,8 @@ class DocumentResearchAgent:
             "continuation_attempts": 0,
             "answer_fragments": [],
             "usage_by_response_id": {},
+            "requirements": {},
+            "evidence_pack": _build_evidence_pack([]),
             "prompt_cache_key": self._prompt_cache_key(mode),
         }
 
@@ -1572,11 +1779,45 @@ class DocumentResearchAgent:
         ]
         return "\n".join(part for part in parts if part)
 
+    def _requirements_for_run(self, *, run: DocumentResearchRun) -> dict[str, Any]:
+        metadata = dict(run.metadata or {})
+        existing = metadata.get("requirements")
+        if isinstance(existing, dict) and existing:
+            return existing
+        request_payload = run.request_payload or {}
+        requirements = _make_turn_requirements(
+            mode=run.mode,
+            request_text=self._request_text(request_payload=request_payload),
+            selected_text=str(request_payload.get("selected_text") or ""),
+            has_client_files=self.has_client_files,
+            has_active_exemplars=self.has_active_exemplars,
+        )
+        metadata["requirements"] = requirements
+        run.metadata = metadata
+        return requirements
+
     def _request_requirements_block_for_run(self, *, run: DocumentResearchRun) -> str:
-        return _request_requirements_block(self._request_text(request_payload=run.request_payload or {}))
+        return _turn_requirements_block(self._requirements_for_run(run=run))
 
     def _requested_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> set[str]:
-        return _requested_full_text_sources(self._request_text(request_payload=run.request_payload or {}))
+        requirements = self._requirements_for_run(run=run)
+        return {
+            str(item).strip()
+            for item in (requirements.get("required_full_text_sources") or [])
+            if str(item).strip()
+        }
+
+    def _refresh_run_evidence_pack(self, *, run: DocumentResearchRun) -> None:
+        metadata = dict(run.metadata or {})
+        metadata["evidence_pack"] = _build_evidence_pack(run.tool_calls or [])
+        run.metadata = metadata
+
+    def _set_run_phase(self, *, run: DocumentResearchRun, phase: str, stage: str | None = None) -> None:
+        metadata = dict(run.metadata or {})
+        metadata["phase"] = phase
+        if stage is not None:
+            run.stage = stage
+        run.metadata = metadata
 
     def _missing_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> list[str]:
         requested_sources = self._requested_full_text_sources_for_run(run=run)
@@ -1667,7 +1908,12 @@ class DocumentResearchAgent:
             return self._mark_run_failed(run, str(exc))
 
         run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=follow_up, stage="verifying_quotes")
+        return self._attach_started_response(
+            run=run,
+            response=follow_up,
+            stage="verifying_quotes",
+            phase=_RUN_PHASE_VERIFY,
+        )
 
     def _run_instructions(self, run: DocumentResearchRun) -> str:
         if run.mode == "suggest":
@@ -1749,10 +1995,10 @@ class DocumentResearchAgent:
         run: DocumentResearchRun,
         response: Any,
         stage: str,
+        phase: str | None = None,
     ) -> DocumentResearchRun:
         run.response_id = getattr(response, "id", "") or ""
         run.response_count = int(run.response_count or 0) + 1
-        run.stage = stage
         status = _response_status(response)
         if status == "queued":
             run.status = "queued"
@@ -1763,6 +2009,7 @@ class DocumentResearchAgent:
         else:
             run.status = "in_progress"
         self._record_response_artifacts(run, response)
+        self._set_run_phase(run=run, phase=phase or _stage_phase(stage), stage=stage)
         run.save(
             update_fields=[
                 "status",
@@ -1796,16 +2043,17 @@ class DocumentResearchAgent:
         run.usage = _sum_usage_by_response(usage_by_response_id)
         run.tool_calls = _merge_unique_records(run.tool_calls or [], _extract_hosted_tool_calls(response))
         run.citations = _merge_unique_records(run.citations or [], _extract_citations(response))
+        self._refresh_run_evidence_pack(run=run)
 
     def _update_run_state(self, run: DocumentResearchRun, *, status: str, stage: str) -> DocumentResearchRun:
         run.status = status
-        run.stage = stage
+        self._set_run_phase(run=run, phase=_stage_phase(stage), stage=stage)
         run.save(update_fields=["status", "stage", "tool_calls", "citations", "usage", "metadata", "updated_at"])
         return run
 
     def _mark_run_failed(self, run: DocumentResearchRun, message: str) -> DocumentResearchRun:
         run.status = "failed"
-        run.stage = "failed"
+        self._set_run_phase(run=run, phase=_RUN_PHASE_FAILED, stage="failed")
         run.error_message = (message or "The agent run failed.").strip()
         run.completed_at = timezone.now()
         run.save(
@@ -1825,7 +2073,7 @@ class DocumentResearchAgent:
 
     def _mark_run_cancelled(self, run: DocumentResearchRun, message: str) -> DocumentResearchRun:
         run.status = "cancelled"
-        run.stage = "cancelled"
+        self._set_run_phase(run=run, phase=_RUN_PHASE_CANCELLED, stage="cancelled")
         run.error_message = (message or "The agent run was cancelled.").strip()
         run.completed_at = timezone.now()
         run.save(
@@ -1845,7 +2093,7 @@ class DocumentResearchAgent:
 
     def _mark_run_completed(self, run: DocumentResearchRun, *, result_payload: dict[str, Any], response: Any) -> DocumentResearchRun:
         run.status = "completed"
-        run.stage = "completed"
+        self._set_run_phase(run=run, phase=_RUN_PHASE_COMPLETED, stage="completed")
         run.error_message = ""
         run.completed_at = timezone.now()
         run.response_id = (getattr(response, "id", "") or run.response_id or "").strip()
@@ -1911,6 +2159,41 @@ class DocumentResearchAgent:
             return f"The agent run exceeded the reasoning token budget of {AGENT_MAX_REASONING_TOKENS}."
         return ""
 
+    def _queue_compact_finalization(
+        self,
+        *,
+        run: DocumentResearchRun,
+        response: Any,
+        stage: str,
+        note: str,
+        allow_over_budget: bool = False,
+    ) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if allow_over_budget:
+            metadata["allow_over_budget_finalization"] = True
+        run.metadata = metadata
+        compact_input = self._finalization_input_from_run(run=run)
+        try:
+            follow_up = self._create_background_response(
+                instructions=self._run_instructions(run) + "\n\nFinalization note:\n" + note.strip(),
+                input_payload=compact_input,
+                tools=[],
+                previous_response_id=None,
+                tool_choice="none",
+                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(
+            run=run,
+            response=follow_up,
+            stage=stage,
+            phase=_RUN_PHASE_FINALIZE,
+        )
+
     def _recover_budget_overrun(
         self,
         *,
@@ -1932,26 +2215,17 @@ class DocumentResearchAgent:
         metadata["allow_over_budget_finalization"] = True
         metadata["budget_recovery_reason"] = reason
         run.metadata = metadata
-        compact_input = self._finalization_input_from_run(run=run)
-        try:
-            follow_up = self._create_background_response(
-                instructions=(
-                    self._run_instructions(run)
-                    + "\n\nThe run has reached its budget threshold. "
-                    + "Using only the verified research already gathered, provide the final answer now. "
-                    + "Do not call any more tools."
-                ),
-                input_payload=compact_input,
-                tools=[],
-                previous_response_id=None,
-                tool_choice="none",
-                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
-                mode=run.mode,
-                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
-            )
-        except AgentExecutionError:
-            return None
-        return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
+        return self._queue_compact_finalization(
+            run=run,
+            response=type("BudgetResponse", (), {"id": run.response_id})(),
+            stage="forcing_final",
+            note=(
+                "The run has reached its budget threshold. "
+                "Using only the verified research already gathered, provide the final answer now. "
+                "Do not call any more tools."
+            ),
+            allow_over_budget=True,
+        )
 
     def _recover_failed_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun | None:
         metadata = dict(run.metadata or {})
@@ -1962,32 +2236,16 @@ class DocumentResearchAgent:
 
         metadata["failed_recovery_attempted"] = True
         run.metadata = metadata
-        compact_input = self._finalization_input_from_run(run=run)
-        use_fresh_context = bool(_tool_result_digest(run.tool_calls or []))
-        try:
-            follow_up = self._create_background_response(
-                instructions=(
-                    self._run_instructions(run)
-                    + "\n\nYour previous response ended after gathering research. "
-                    + "Using only the authorities and tool results already in context, provide the final answer now. "
-                    + "Do not call any more tools."
-                ),
-                input_payload=compact_input if use_fresh_context else (
-                    "Provide the final answer now using the research already gathered. "
-                    "Do not call any more tools."
-                ),
-                tools=[],
-                previous_response_id=None if use_fresh_context else ((getattr(response, "id", "") or "").strip() or None),
-                tool_choice="none",
-                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
-                mode=run.mode,
-                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
-            )
-        except AgentExecutionError:
-            return None
-
-        run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=follow_up, stage="recovering_failure")
+        return self._queue_compact_finalization(
+            run=run,
+            response=response,
+            stage="recovering_failure",
+            note=(
+                "Your previous response ended after gathering research. "
+                "Using only the verified research already gathered, provide the final answer now. "
+                "Do not call any more tools."
+            ),
+        )
 
     def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         attempts = int((run.metadata or {}).get("continuation_attempts") or 0)
@@ -2019,7 +2277,12 @@ class DocumentResearchAgent:
         except AgentExecutionError as exc:
             return self._mark_run_failed(run, str(exc))
         run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=follow_up, stage="continuing")
+        return self._attach_started_response(
+            run=run,
+            response=follow_up,
+            stage="continuing",
+            phase=_RUN_PHASE_FINALIZE,
+        )
 
     def _continue_after_function_calls(
         self,
@@ -2076,39 +2339,21 @@ class DocumentResearchAgent:
 
         run.local_function_rounds = int(run.local_function_rounds or 0) + 1
         run.tool_calls = _merge_unique_records(run.tool_calls or [], local_tool_calls)
+        self._refresh_run_evidence_pack(run=run)
         budget_error = self._budget_error(run)
         if budget_error:
             if "local tool continuation budget" in budget_error:
-                metadata = dict(run.metadata or {})
-                metadata["allow_over_budget_finalization"] = True
-                run.metadata = metadata
-                try:
-                    follow_up = self._create_background_response(
-                        instructions=(
-                            self._run_instructions(run)
-                            + "\n\nYou now have the local tool results you need for this turn. "
-                            + "Provide the final answer now and do not call any more tools."
-                        ),
-                        input_payload=outputs + [
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Using the local tool outputs just returned, provide the final answer now. "
-                                    "Do not call any more tools."
-                                ),
-                            }
-                        ],
-                        tools=[],
-                        previous_response_id=(getattr(response, "id", "") or "").strip() or None,
-                        tool_choice="none",
-                        max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
-                        mode=run.mode,
-                        reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
-                    )
-                except AgentExecutionError as exc:
-                    return self._mark_run_failed(run, str(exc))
-                run.previous_response_id = (getattr(response, "id", "") or "").strip()
-                return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
+                return self._queue_compact_finalization(
+                    run=run,
+                    response=response,
+                    stage="forcing_final",
+                    note=(
+                        "You now have the local tool results needed for this turn. "
+                        "Provide the final answer now using only the verified research already gathered. "
+                        "Do not call any more tools."
+                    ),
+                    allow_over_budget=True,
+                )
             return self._mark_run_failed(run, budget_error)
 
         try:
@@ -2124,7 +2369,12 @@ class DocumentResearchAgent:
         except AgentExecutionError as exc:
             return self._mark_run_failed(run, str(exc))
         run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=follow_up, stage="running_tools")
+        return self._attach_started_response(
+            run=run,
+            response=follow_up,
+            stage="running_tools",
+            phase=_RUN_PHASE_RESEARCH,
+        )
 
     def _queue_force_final_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
@@ -2133,32 +2383,16 @@ class DocumentResearchAgent:
 
         metadata["forced_final_attempted"] = True
         run.metadata = metadata
-        compact_input = self._finalization_input_from_run(run=run)
-        use_fresh_context = bool(_tool_result_digest(run.tool_calls or []))
-        try:
-            follow_up = self._create_background_response(
-                instructions=(
-                    self._run_instructions(run)
-                    + "\n\nYou have already received the relevant tool outputs for this turn. "
-                    + "Provide the final answer now and do not call any more tools."
-                ),
-                input_payload=compact_input if use_fresh_context else [
-                    {
-                        "role": "user",
-                        "content": "Provide the final answer to the attorney now. Do not call any more tools.",
-                    }
-                ],
-                tools=[],
-                previous_response_id=None if use_fresh_context else ((getattr(response, "id", "") or "").strip() or None),
-                tool_choice="none",
-                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
-                mode=run.mode,
-                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
-            )
-        except AgentExecutionError as exc:
-            return self._mark_run_failed(run, str(exc))
-        run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
+        return self._queue_compact_finalization(
+            run=run,
+            response=response,
+            stage="forcing_final",
+            note=(
+                "You have already received the relevant tool outputs for this turn. "
+                "Provide the final answer now using only the verified research already gathered. "
+                "Do not call any more tools."
+            ),
+        )
 
     def _queue_json_repair(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
@@ -2188,7 +2422,12 @@ class DocumentResearchAgent:
         except AgentExecutionError as exc:
             return self._mark_run_failed(run, str(exc))
         run.previous_response_id = (getattr(response, "id", "") or "").strip()
-        return self._attach_started_response(run=run, response=repair_response, stage="repairing_json")
+        return self._attach_started_response(
+            run=run,
+            response=repair_response,
+            stage="repairing_json",
+            phase=_RUN_PHASE_FINALIZE,
+        )
 
     def _finalize_chat_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
@@ -2333,11 +2572,16 @@ class DocumentResearchAgent:
             or request_payload.get("instruction")
             or ""
         ).strip()
-        request_text = self._request_text(request_payload=request_payload)
-        request_requirements = _request_requirements_block(request_text)
+        request_requirements = _turn_requirements_block(self._requirements_for_run(run=run))
         document_type = self.document.document_type.name if self.document.document_type else "Unknown"
         document_slug = self.document.document_type.slug if self.document.document_type else ""
-        tool_digest = _tool_result_digest(run.tool_calls or [])
+        metadata = dict(run.metadata or {})
+        evidence_pack = metadata.get("evidence_pack") if isinstance(metadata.get("evidence_pack"), dict) else {}
+        if not evidence_pack:
+            evidence_pack = _build_evidence_pack(run.tool_calls or [])
+            metadata["evidence_pack"] = evidence_pack
+            run.metadata = metadata
+        evidence_text = _evidence_pack_text(evidence_pack)
 
         parts = [
             "You are finalizing a research answer for the attorney using verified tool results already gathered.",
@@ -2354,8 +2598,8 @@ class DocumentResearchAgent:
             parts.extend(["", "Selected text:", selected_text[:4000]])
         if focus_note:
             parts.extend(["", "User focus note:", focus_note[:2000]])
-        if tool_digest:
-            parts.extend(["", "Verified research results from tools:", tool_digest])
+        if evidence_text:
+            parts.extend(["", "Evidence pack:", evidence_text])
 
         if run.mode == "suggest":
             parts.extend(
@@ -2442,9 +2686,17 @@ class DocumentResearchAgent:
         if transcript:
             blocks.append("Conversation so far:\n" + transcript)
         blocks.append(self._document_context_block(mode="chat", selected_text=selected_text))
-        request_requirements = _request_requirements_block(message)
-        if request_requirements:
-            blocks.append(request_requirements)
+        blocks.append(
+            _turn_requirements_block(
+                _make_turn_requirements(
+                    mode="chat",
+                    request_text=message,
+                    selected_text=selected_text,
+                    has_client_files=self.has_client_files,
+                    has_active_exemplars=self.has_active_exemplars,
+                )
+            )
+        )
         blocks.append("User message:\n" + message.strip())
         return "\n\n".join(block for block in blocks if block).strip()
 
@@ -2452,9 +2704,17 @@ class DocumentResearchAgent:
         blocks = [
             self._document_context_block(mode="suggest", selected_text=selected_text, focus_note=focus_note),
         ]
-        request_requirements = _request_requirements_block(focus_note)
-        if request_requirements:
-            blocks.append(request_requirements)
+        blocks.append(
+            _turn_requirements_block(
+                _make_turn_requirements(
+                    mode="suggest",
+                    request_text=focus_note,
+                    selected_text=selected_text,
+                    has_client_files=self.has_client_files,
+                    has_active_exemplars=self.has_active_exemplars,
+                )
+            )
+        )
         blocks.append("Task:\nSuggest the best authorities for the selected passage in this document.")
         return "\n\n".join(block for block in blocks if block).strip()
 
@@ -2462,9 +2722,17 @@ class DocumentResearchAgent:
         blocks = [
             self._document_context_block(mode="edit", selected_text=selected_text),
         ]
-        request_requirements = _request_requirements_block(instruction)
-        if request_requirements:
-            blocks.append(request_requirements)
+        blocks.append(
+            _turn_requirements_block(
+                _make_turn_requirements(
+                    mode="edit",
+                    request_text=instruction,
+                    selected_text=selected_text,
+                    has_client_files=self.has_client_files,
+                    has_active_exemplars=self.has_active_exemplars,
+                )
+            )
+        )
         if selected_text:
             blocks.append(
                 "Edit target:\nUse the selected text as the exact target for any replace, insert-after, or delete operation."

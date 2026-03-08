@@ -883,10 +883,80 @@ class AgentServiceTests(TestCase):
             "Find quotes from case law and quotes from the USCIS Policy Manual that I can use."
         )
 
-        self.assertIn("Turn requirements:", note)
-        self.assertIn("required_full_text_sources: case_law, policy", note)
+        self.assertIn("Turn requirements JSON:", note)
+        self.assertIn('"requires_exact_quotes": true', note)
+        self.assertIn('"required_full_text_sources": [', note)
+        self.assertIn('"case"', note)
+        self.assertIn('"policy"', note)
         self.assertIn("policy=search_references(source_code='uscis_pm')->get_reference", note)
         self.assertIn("case_law=get_document_text", note)
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_start_edit_run_stores_structured_requirements(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="queued",
+            stage="queued",
+        )
+        queued_response = SimpleNamespace(id="resp_edit_start", status="queued", error=None, usage=None, output=[])
+
+        with patch.object(agent, "_build_tools", return_value=[]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response):
+                updated = agent.start_edit_run(
+                    run=run,
+                    instruction="Find quotes from the USCIS Policy Manual and revise this section.",
+                    selected_text="Selected paragraph text.",
+                )
+
+        self.assertEqual(updated.metadata.get("phase"), "research")
+        requirements = updated.metadata.get("requirements") or {}
+        self.assertEqual(requirements.get("mode"), "edit")
+        self.assertEqual(requirements.get("output_format"), "edit_json")
+        self.assertTrue(requirements.get("has_selected_text"))
+        self.assertTrue(requirements.get("requires_exact_quotes"))
+        self.assertIn("policy", requirements.get("required_full_text_sources") or [])
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_record_response_artifacts_updates_evidence_pack(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            metadata=agent._initial_run_metadata(mode="chat", previous_response_id=""),
+        )
+        response = SimpleNamespace(
+            id="resp_evidence",
+            usage=None,
+            output=[
+                SimpleNamespace(
+                    type="mcp_call",
+                    name="get_reference",
+                    status="completed",
+                    arguments='{"reference_id":324,"source_code":"uscis_pm"}',
+                    output='{"title":"USCIS Policy Manual","text":"A CPR may change to or add another waiver filing basis by making the request in writing."}',
+                    error="",
+                )
+            ],
+        )
+
+        agent._record_response_artifacts(run, response)
+
+        evidence_pack = (run.metadata or {}).get("evidence_pack") or {}
+        self.assertEqual(evidence_pack["counts"]["legal_authorities"], 1)
+        self.assertEqual(evidence_pack["legal_authorities"][0]["tool"], "get_reference")
+        self.assertIn("waiver filing basis", evidence_pack["legal_authorities"][0]["excerpt"])
 
     def test_normalize_edit_result_falls_back_to_append_without_selected_text(self):
         normalized = _normalize_edit_result(
@@ -998,7 +1068,7 @@ class AgentServiceTests(TestCase):
         request = create_background.call_args.kwargs
         self.assertIsNone(request["previous_response_id"])
         self.assertEqual(request["tool_choice"], "none")
-        self.assertIn("Verified research results from tools:", request["input_payload"])
+        self.assertIn("Evidence pack:", request["input_payload"])
         self.assertIn("waiver filing basis", request["input_payload"])
 
     @patch("editor.agent_service._new_openai_client")
@@ -1227,7 +1297,7 @@ class AgentServiceTests(TestCase):
         self.assertEqual(request["tool_choice"], "auto")
         self.assertEqual(request["previous_response_id"], "resp_policy_search")
         self.assertEqual(request["instructions"], agent._run_instructions(run))
-        self.assertIn("Turn requirements:", request["input_payload"])
+        self.assertIn("Turn requirements JSON:", request["input_payload"])
         self.assertIn("missing_full_text_sources: policy, case_law", request["input_payload"])
 
 
