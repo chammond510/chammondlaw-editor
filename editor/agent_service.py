@@ -103,9 +103,8 @@ Research operating rules:
 8. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
 9. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 10. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-11. If the attorney asks for direct quotes or exact source language, retrieve the actual source text before answering. For USCIS Policy Manual sections, use search_references with source_code='uscis_pm' and then get_reference. For statutes and regulations, use get_statute. For cases, use get_document_text.
-12. Do not say the text is unavailable unless you actually tried the relevant full-text tool in this turn.
-13. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
+11. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
+12. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
 - Be direct, practical, and collaborative.
@@ -127,7 +126,7 @@ Hard rules:
 7. Research efficiently. Start broad, then narrow to the best 2 to 5 authorities for this passage.
 8. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 9. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-10. If the attorney asks for quoted language or an exact pinpoint from a policy manual, statute, regulation, or case, retrieve the actual full text before drafting the pinpoint.
+10. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before drafting any quoted pinpoint.
 11. Once you have enough verified authority to support the selection, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
@@ -591,27 +590,52 @@ def _requested_full_text_sources(text: str) -> set[str]:
     return sources
 
 
-def _quote_request_runtime_note(text: str) -> str:
-    requested_sources = _requested_full_text_sources(text)
-    if not requested_sources:
+_FULL_TEXT_SOURCE_LABELS = {
+    "policy": "policy",
+    "statute": "statute_or_regulation",
+    "case": "case_law",
+}
+
+_FULL_TEXT_SOURCE_TOOL_RULES = {
+    "policy": "policy=search_references(source_code='uscis_pm')->get_reference",
+    "statute": "statute_or_regulation=get_statute",
+    "case": "case_law=get_document_text",
+}
+
+
+def _request_requirements(text: str) -> dict[str, Any]:
+    requested_sources = sorted(_requested_full_text_sources(text))
+    return {
+        "requires_exact_quotes": bool(requested_sources),
+        "required_full_text_sources": requested_sources,
+    }
+
+
+def _request_requirements_block(text: str) -> str:
+    requirements = _request_requirements(text)
+    if not requirements["requires_exact_quotes"]:
         return ""
 
-    instructions = []
-    if "policy" in requested_sources:
-        instructions.append(
-            "For USCIS Policy Manual text, use search_references with source_code='uscis_pm' and then get_reference before quoting."
-        )
-    if "statute" in requested_sources:
-        instructions.append("For statutes or regulations, use get_statute before quoting exact language.")
-    if "case" in requested_sources:
-        instructions.append("For case law, use get_document_text before quoting exact language.")
-
-    return (
-        "Runtime note:\n"
-        "The attorney asked for direct quotes or exact source language. "
-        + " ".join(instructions)
-        + " Do not say the text is unavailable unless you have tried the relevant full-text tool in this turn."
+    labels = [
+        _FULL_TEXT_SOURCE_LABELS.get(source, source)
+        for source in requirements["required_full_text_sources"]
+    ]
+    rules = [
+        _FULL_TEXT_SOURCE_TOOL_RULES[source]
+        for source in requirements["required_full_text_sources"]
+        if source in _FULL_TEXT_SOURCE_TOOL_RULES
+    ]
+    lines = [
+        "Turn requirements:",
+        "- requires_exact_quotes: yes",
+        f"- required_full_text_sources: {', '.join(labels)}",
+    ]
+    if rules:
+        lines.append(f"- required_tool_sequence: {'; '.join(rules)}")
+    lines.append(
+        "- finalization_rule: do not claim exact quoted text unless the relevant full-text tool was used in this turn"
     )
+    return "\n".join(lines)
 
 
 def _extract_citations(response: Any) -> list[dict[str, Any]]:
@@ -1295,6 +1319,9 @@ class DocumentResearchAgent:
         ]
         return "\n".join(part for part in parts if part)
 
+    def _request_requirements_block_for_run(self, *, run: DocumentResearchRun) -> str:
+        return _request_requirements_block(self._request_text(request_payload=run.request_payload or {}))
+
     def _requested_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> set[str]:
         return _requested_full_text_sources(self._request_text(request_payload=run.request_payload or {}))
 
@@ -1308,13 +1335,13 @@ class DocumentResearchAgent:
             for item in (run.tool_calls or [])
             if isinstance(item, dict)
         }
-        missing = []
+        missing: list[str] = []
         if "policy" in requested_sources and "get_reference" not in tool_names:
-            missing.append("USCIS Policy Manual or other reference full text")
+            missing.append("policy")
         if "statute" in requested_sources and "get_statute" not in tool_names:
-            missing.append("statute or regulation full text")
+            missing.append("statute")
         if "case" in requested_sources and "get_document_text" not in tool_names:
-            missing.append("case-law full text")
+            missing.append("case")
         return missing
 
     def _append_answer_fragment(self, *, run: DocumentResearchRun, response: Any) -> None:
@@ -1361,23 +1388,23 @@ class DocumentResearchAgent:
 
         metadata["quote_source_verification_attempted"] = True
         run.metadata = metadata
-        missing_text = "; ".join(missing_sources)
+        labels = [_FULL_TEXT_SOURCE_LABELS.get(source, source) for source in missing_sources]
+        request_requirements = self._request_requirements_block_for_run(run=run)
+        input_lines = []
+        if request_requirements:
+            input_lines.append(request_requirements)
+        input_lines.extend(
+            [
+                "Verification step:",
+                f"- missing_full_text_sources: {', '.join(labels)}",
+                "- action: retrieve the missing full-text authorities before answering",
+                "- fallback_rule: if the correct full-text tool still does not produce the text, say so plainly",
+            ]
+        )
         try:
             follow_up = self._create_background_response(
-                instructions=(
-                    self._run_instructions(run)
-                    + "\n\nRuntime note:\n"
-                    + "The attorney requested direct quotes or exact source language. "
-                    + "Before answering, retrieve the missing full-text authorities and only then draft the answer. "
-                    + "For USCIS Policy Manual sections, use search_references with source_code='uscis_pm' and then get_reference. "
-                    + "For statutes or regulations, use get_statute. "
-                    + "For case law, use get_document_text. "
-                    + "Do not say the text is unavailable unless you actually tried the relevant full-text tool in this turn."
-                ),
-                input_payload=(
-                    "Before finalizing, retrieve the actual source text for these requested authority types: "
-                    f"{missing_text}. Then answer the attorney with verified quoted language if available."
-                ),
+                instructions=self._run_instructions(run),
+                input_payload="\n".join(input_lines),
                 tools=self._build_tools(mode=run.mode, include_mcp=self._run_include_mcp(run)),
                 previous_response_id=(getattr(response, "id", "") or "").strip() or None,
                 tool_choice="auto",
@@ -1933,6 +1960,8 @@ class DocumentResearchAgent:
         selected_text = str(request_payload.get("selected_text") or "").strip()
         focus_note = str(request_payload.get("focus_note") or "").strip()
         attorney_message = str(request_payload.get("message") or "").strip()
+        request_text = self._request_text(request_payload=request_payload)
+        request_requirements = _request_requirements_block(request_text)
         document_type = self.document.document_type.name if self.document.document_type else "Unknown"
         document_slug = self.document.document_type.slug if self.document.document_type else ""
         tool_digest = _tool_result_digest(run.tool_calls or [])
@@ -1944,18 +1973,14 @@ class DocumentResearchAgent:
         ]
         if document_slug:
             parts.append(f"Document type slug: {document_slug}")
+        if request_requirements:
+            parts.extend(["", request_requirements])
         if attorney_message:
             parts.extend(["", "Attorney request:", attorney_message[:4000]])
-            runtime_note = _quote_request_runtime_note(attorney_message)
-            if runtime_note:
-                parts.extend(["", runtime_note])
         if selected_text:
             parts.extend(["", "Selected text:", selected_text[:4000]])
         if focus_note:
             parts.extend(["", "User focus note:", focus_note[:2000]])
-            runtime_note = _quote_request_runtime_note(focus_note)
-            if runtime_note:
-                parts.extend(["", runtime_note])
         if tool_digest:
             parts.extend(["", "Verified research results from tools:", tool_digest])
 
@@ -2029,9 +2054,9 @@ class DocumentResearchAgent:
         if transcript:
             blocks.append("Conversation so far:\n" + transcript)
         blocks.append(self._document_context_block(mode="chat", selected_text=selected_text))
-        runtime_note = _quote_request_runtime_note(message)
-        if runtime_note:
-            blocks.append(runtime_note)
+        request_requirements = _request_requirements_block(message)
+        if request_requirements:
+            blocks.append(request_requirements)
         blocks.append("User message:\n" + message.strip())
         return "\n\n".join(block for block in blocks if block).strip()
 
@@ -2039,9 +2064,9 @@ class DocumentResearchAgent:
         blocks = [
             self._document_context_block(mode="suggest", selected_text=selected_text, focus_note=focus_note),
         ]
-        runtime_note = _quote_request_runtime_note(focus_note)
-        if runtime_note:
-            blocks.append(runtime_note)
+        request_requirements = _request_requirements_block(focus_note)
+        if request_requirements:
+            blocks.append(request_requirements)
         blocks.append("Task:\nSuggest the best authorities for the selected passage in this document.")
         return "\n\n".join(block for block in blocks if block).strip()
 

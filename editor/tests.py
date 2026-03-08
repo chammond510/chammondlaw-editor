@@ -17,7 +17,7 @@ from .agent_service import (
     _extract_hosted_tool_calls,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
-    _quote_request_runtime_note,
+    _request_requirements_block,
     _requested_full_text_sources,
 )
 from .models import (
@@ -568,13 +568,15 @@ class AgentServiceTests(TestCase):
 
         self.assertEqual(sources, {"case", "policy"})
 
-    def test_quote_request_runtime_note_guides_full_text_tools(self):
-        note = _quote_request_runtime_note(
+    def test_request_requirements_block_guides_full_text_tools(self):
+        note = _request_requirements_block(
             "Find quotes from case law and quotes from the USCIS Policy Manual that I can use."
         )
 
-        self.assertIn("search_references with source_code='uscis_pm' and then get_reference", note)
-        self.assertIn("get_document_text", note)
+        self.assertIn("Turn requirements:", note)
+        self.assertIn("required_full_text_sources: case_law, policy", note)
+        self.assertIn("policy=search_references(source_code='uscis_pm')->get_reference", note)
+        self.assertIn("case_law=get_document_text", note)
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
@@ -902,8 +904,9 @@ class AgentServiceTests(TestCase):
         request = create_background.call_args.kwargs
         self.assertEqual(request["tool_choice"], "auto")
         self.assertEqual(request["previous_response_id"], "resp_policy_search")
-        self.assertIn("source_code='uscis_pm' and then get_reference", request["instructions"])
-        self.assertIn("USCIS Policy Manual", request["input_payload"])
+        self.assertEqual(request["instructions"], agent._run_instructions(run))
+        self.assertIn("Turn requirements:", request["input_payload"])
+        self.assertIn("missing_full_text_sources: policy, case_law", request["input_payload"])
 
 
 class CoverLetterExportTests(TestCase):
