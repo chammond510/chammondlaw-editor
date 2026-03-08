@@ -20,6 +20,7 @@ from .agent_service import (
     _extract_output_text,
     _extract_hosted_tool_calls,
     _knowledge_function_tools,
+    _normalize_edit_result,
     _normalize_mcp_server_url,
     _request_requirements_block,
     _requested_full_text_sources,
@@ -30,6 +31,7 @@ from .models import (
     DocumentResearchMessage,
     DocumentResearchRun,
     DocumentResearchSession,
+    DocumentVersion,
     DocumentType,
 )
 
@@ -454,6 +456,117 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(payload["suggest_result"]["selection_summary"], "Nexus support for gang-based persecution.")
         self.assertEqual(payload["suggest_result"]["authorities"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
 
+    @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_edit_starts_background_run(self, agent_cls):
+        agent = agent_cls.return_value
+
+        def fake_start_edit_run(*, run, **kwargs):
+            run.status = "in_progress"
+            run.stage = "waiting_openai"
+            run.response_id = "resp_edit_1"
+            run.response_count = 1
+            run.save(update_fields=["status", "stage", "response_id", "response_count", "updated_at"])
+            return run
+
+        agent.start_edit_run.side_effect = fake_start_edit_run
+
+        response = self.client.post(
+            reverse("research_agent_edit", kwargs={"doc_id": self.document.id}),
+            data={
+                "instruction": "Rewrite this paragraph to tighten the nexus analysis.",
+                "selected_text": "The client fears return because gang threats escalated.",
+                "selection_from": 5,
+                "selection_to": 62,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "in_progress")
+        self.assertEqual(payload["run"]["response_id"], "resp_edit_1")
+
+    @patch("editor.agent_views.DocumentResearchAgent")
+    def test_agent_run_status_returns_completed_edit_payload(self, agent_cls):
+        agent = agent_cls.return_value
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="waiting_openai",
+        )
+
+        def fake_advance_run(*, run):
+            run.status = "completed"
+            run.stage = "completed"
+            run.response_id = "resp_edit_done"
+            run.result_payload = {
+                "edit_summary": "Tighten the nexus paragraph.",
+                "rationale": "This version states the legal standard first and then ties it to the facts.",
+                "operation": "replace_selection",
+                "target_text": "The client fears return because gang threats escalated.",
+                "proposed_text": "The record shows the gang threatened the client because he reported the extortion to police.",
+                "notes": "Uses a clearer causal link.",
+                "selected_text": "The client fears return because gang threats escalated.",
+                "selection_from": 5,
+                "selection_to": 62,
+                "selection_required": True,
+                "tool_calls": [{"source": "biaedge", "name": "search_cases", "type": "mcp_call"}],
+                "citations": [],
+                "raw_answer": "{}",
+            }
+            run.save(update_fields=["status", "stage", "response_id", "result_payload", "updated_at"])
+            return run
+
+        agent.advance_run.side_effect = fake_advance_run
+
+        response = self.client.get(
+            reverse("research_agent_run", kwargs={"run_id": run.public_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run"]["status"], "completed")
+        self.assertEqual(payload["edit_result"]["operation"], "replace_selection")
+        self.assertIn("legal standard first", payload["edit_result"]["rationale"])
+
+    def test_agent_apply_edit_snapshots_current_content_and_saves_new_content(self):
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="completed",
+            stage="completed",
+            result_payload={
+                "edit_summary": "Strengthen nexus paragraph",
+                "operation": "replace_selection",
+                "proposed_text": "Updated paragraph text.",
+            },
+        )
+        current_content = _sample_tiptap("Original paragraph text.")
+        new_content = _sample_tiptap("Updated paragraph text.")
+
+        response = self.client.post(
+            reverse("research_agent_apply_edit", kwargs={"doc_id": self.document.id}),
+            data={
+                "run_id": str(run.public_id),
+                "current_content": current_content,
+                "new_content": new_content,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.document.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(self.document.content, new_content)
+        self.assertEqual(run.result_payload["applied_at"], payload["edit_result"]["applied_at"])
+        snapshot = DocumentVersion.objects.get(id=payload["version"]["id"])
+        self.assertEqual(snapshot.content, current_content)
+        self.assertTrue(snapshot.label.startswith("Before agent edit - Strengthen nexus paragraph"))
+
 
 class AgentServiceTests(TestCase):
     def setUp(self):
@@ -611,6 +724,18 @@ class AgentServiceTests(TestCase):
         self.assertIn("required_full_text_sources: case_law, policy", note)
         self.assertIn("policy=search_references(source_code='uscis_pm')->get_reference", note)
         self.assertIn("case_law=get_document_text", note)
+
+    def test_normalize_edit_result_falls_back_to_append_without_selected_text(self):
+        normalized = _normalize_edit_result(
+            {
+                "edit_summary": "Add a conclusion",
+                "operation": "replace_selection",
+                "proposed_text": "For these reasons, USCIS should approve the petition.",
+            },
+            request_payload={"selected_text": ""},
+        )
+
+        self.assertEqual(normalized["operation"], "append_to_document")
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(

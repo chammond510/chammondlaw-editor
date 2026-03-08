@@ -99,6 +99,7 @@
         <div class="p-3 border-b border-gray-100 flex gap-2">
             <button id="tab-chat" class="tab-btn tab-btn-active px-3 py-1 text-xs rounded">Chat</button>
             <button id="tab-suggest" class="tab-btn px-3 py-1 text-xs rounded border">Suggest</button>
+            <button id="tab-edit" class="tab-btn px-3 py-1 text-xs rounded border">Edit</button>
             <button id="tab-exemplars" class="tab-btn px-3 py-1 text-xs rounded border">Exemplars</button>
         </div>
 
@@ -138,6 +139,24 @@
             </div>
             <div id="agent-suggest-summary" class="hidden text-xs text-gray-600"></div>
             <div id="agent-suggest-results" class="space-y-2"></div>
+        </div>
+
+        <div id="edit-panel" class="p-3 hidden space-y-3">
+            <div class="border rounded p-2 bg-gray-50">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="text-xs font-semibold text-gray-700">Edit target</div>
+                    <button id="refresh-edit-selection" class="px-2 py-1 text-xs border rounded">Use Current Selection</button>
+                </div>
+                <div id="edit-selection-preview" class="mt-2 text-xs text-gray-700 whitespace-pre-wrap">
+                    Select text in the editor to revise it, or leave nothing selected to draft new language.
+                </div>
+            </div>
+            <textarea id="agent-edit-input" rows="4" class="w-full border rounded px-2 py-2 text-sm" placeholder="Tell the agent what to change, e.g. strengthen this nexus paragraph with case law and cleaner language, or draft a short conclusion for this cover letter."></textarea>
+            <button id="run-agent-edit" class="w-full px-3 py-2 text-xs bg-navy text-white rounded">Propose Edit</button>
+            <div id="agent-edit-status" class="text-xs text-gray-500">
+                The agent can propose a controlled edit to selected text or draft new language. It will not change the document until you apply it.
+            </div>
+            <div id="agent-edit-result" class="space-y-2"></div>
         </div>
 
         <div id="exemplar-panel" class="p-3 hidden space-y-3">
@@ -512,6 +531,7 @@ function updateToolbar() {
 
 const AGENT_DEFAULT_CHAT_STATUS = 'The agent reads the current draft and will include the current selection when available.';
 const AGENT_DEFAULT_SUGGEST_STATUS = 'The agent will read the current draft and selected passage before suggesting authorities.';
+const AGENT_DEFAULT_EDIT_STATUS = 'The agent can propose a controlled edit to selected text or draft new language. It will not change the document until you apply it.';
 const AGENT_POLL_INTERVAL_MS = 2500;
 const AGENT_POLL_RETRY_INTERVAL_MS = 4000;
 const AGENT_MAX_POLL_FAILURES = 4;
@@ -525,6 +545,7 @@ let agentPollTimer = null;
 let agentPollInFlight = false;
 let agentPollFailures = 0;
 let agentLatestSuggestResult = null;
+let agentLatestEditResult = null;
 
 function setStatusTone(node, tone = 'neutral') {
   node.classList.remove('text-gray-500', 'text-red-700', 'text-green-700', 'text-navy');
@@ -543,6 +564,12 @@ function setAgentChatStatus(message = AGENT_DEFAULT_CHAT_STATUS, tone = 'neutral
 function setSuggestStatus(message = AGENT_DEFAULT_SUGGEST_STATUS, tone = 'neutral') {
   const node = document.getElementById('agent-suggest-status');
   node.textContent = message || AGENT_DEFAULT_SUGGEST_STATUS;
+  setStatusTone(node, tone);
+}
+
+function setEditStatus(message = AGENT_DEFAULT_EDIT_STATUS, tone = 'neutral') {
+  const node = document.getElementById('agent-edit-status');
+  node.textContent = message || AGENT_DEFAULT_EDIT_STATUS;
   setStatusTone(node, tone);
 }
 
@@ -580,13 +607,17 @@ function syncAgentControls() {
   const sendButton = document.getElementById('agent-send');
   const resetButton = document.getElementById('agent-reset');
   const suggestButton = document.getElementById('run-agent-suggest');
+  const editButton = document.getElementById('run-agent-edit');
 
   sendButton.disabled = agentBusy;
   suggestButton.disabled = agentBusy;
+  editButton.disabled = agentBusy;
   sendButton.classList.toggle('opacity-60', agentBusy);
   suggestButton.classList.toggle('opacity-60', agentBusy);
+  editButton.classList.toggle('opacity-60', agentBusy);
   sendButton.textContent = agentBusy && activeMode === 'chat' ? 'Working...' : 'Send';
   suggestButton.textContent = agentBusy && activeMode === 'suggest' ? 'Researching...' : 'Suggest Authorities';
+  editButton.textContent = agentBusy && activeMode === 'edit' ? 'Drafting...' : 'Propose Edit';
   resetButton.textContent = agentBusy ? 'Cancel / Clear' : 'Clear Thread';
 }
 
@@ -598,31 +629,44 @@ function restoreIdleSuggestStatus() {
   setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
 }
 
+function restoreIdleEditStatus() {
+  if (agentLatestEditResult) {
+    const message = agentLatestEditResult.applied_at
+      ? 'Showing the latest applied agent edit.'
+      : 'Showing the latest completed edit proposal.';
+    setEditStatus(message, 'neutral');
+    return;
+  }
+  setEditStatus(AGENT_DEFAULT_EDIT_STATUS, 'neutral');
+}
+
 function pendingRunStatusText(run) {
   const stage = (run?.stage || run?.status_text || run?.detail || run?.current_step || '').trim();
+  const mode = getAgentRunMode(run);
   if (stage === 'queued') {
-    return getAgentRunMode(run) === 'suggest'
-      ? 'Suggestion queued. Starting research...'
-      : 'Agent queued. Starting research...';
+    if (mode === 'suggest') return 'Suggestion queued. Starting research...';
+    if (mode === 'edit') return 'Edit proposal queued. Starting research...';
+    return 'Agent queued. Starting research...';
   }
   if (stage === 'waiting_openai') {
-    return getAgentRunMode(run) === 'suggest'
-      ? 'Researching the selected passage...'
-      : 'Working in the document context...';
+    if (mode === 'suggest') return 'Researching the selected passage...';
+    if (mode === 'edit') return 'Reviewing the draft and drafting the proposed edit...';
+    return 'Working in the document context...';
   }
   if (stage === 'running_tools') return 'Processing tool results...';
   if (stage === 'continuing') return 'Continuing the response...';
-  if (stage === 'forcing_final') return 'Finalizing the answer...';
-  if (stage === 'repairing_json') return 'Repairing the structured result...';
+  if (stage === 'forcing_final') return mode === 'edit' ? 'Finalizing the edit proposal...' : 'Finalizing the answer...';
+  if (stage === 'repairing_json') return mode === 'edit' ? 'Repairing the structured edit proposal...' : 'Repairing the structured result...';
+  if (stage === 'verifying_quotes') return mode === 'edit' ? 'Verifying exact quote sources for the edit...' : 'Verifying exact quote sources...';
   if (stage && !['completed', 'failed', 'cancelled', 'canceled'].includes(stage)) return stage;
   if (getAgentRunStatus(run) === 'queued') {
-    return getAgentRunMode(run) === 'suggest'
-      ? 'Suggestion queued. Starting research...'
-      : 'Agent queued. Starting research...';
+    if (mode === 'suggest') return 'Suggestion queued. Starting research...';
+    if (mode === 'edit') return 'Edit proposal queued. Starting research...';
+    return 'Agent queued. Starting research...';
   }
-  return getAgentRunMode(run) === 'suggest'
-    ? 'Researching the selected passage...'
-    : 'Working in the document context...';
+  if (mode === 'suggest') return 'Researching the selected passage...';
+  if (mode === 'edit') return 'Reviewing the draft and drafting the proposed edit...';
+  return 'Working in the document context...';
 }
 
 function openSidebar() {
@@ -658,6 +702,16 @@ function getCurrentResearchSelection() {
   if (selected) return selected;
   if (lastSelectedResearchText) return lastSelectedResearchText;
   return (editor.getText() || '').trim().slice(0, 1200);
+}
+
+function getLiveSelectionSnapshot() {
+  const from = editor.state.selection.from;
+  const to = editor.state.selection.to;
+  return {
+    from,
+    to,
+    text: editor.state.doc.textBetween(from, to, ' ').trim(),
+  };
 }
 
 function insertCitation(item) {
@@ -818,6 +872,37 @@ function extractSuggestResult(payload) {
   return candidates.find(isSuggestPayload) || null;
 }
 
+function isEditPayload(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    (
+      value.operation ||
+      value.edit_summary ||
+      Object.prototype.hasOwnProperty.call(value, 'proposed_text')
+    )
+  );
+}
+
+function extractEditResult(payload) {
+  const candidates = [
+    payload?.edit_result,
+    payload?.run?.edit_result,
+    payload?.result_payload?.edit_result,
+    payload?.run?.result_payload?.edit_result,
+    payload?.result_payload,
+    payload?.run?.result_payload,
+    payload?.result,
+    payload?.run?.result,
+  ];
+  const result = candidates.find(isEditPayload);
+  if (!result) return null;
+  return {
+    ...result,
+    run_id: result.run_id || getAgentRunId(payload?.run) || payload?.id || null,
+  };
+}
+
 function upsertAgentMessage(message) {
   if (!message) return;
   const incomingId = message.id || message.message_id || null;
@@ -858,7 +943,7 @@ function renderSuggestPending(message, { clearExisting = true } = {}) {
   }
 }
 
-function beginTrackingAgentRun(run, { statusText = '', immediate = false, keepSuggestResult = false } = {}) {
+function beginTrackingAgentRun(run, { statusText = '', immediate = false, keepSuggestResult = false, keepEditResult = false } = {}) {
   if (!run) return;
   setActiveAgentRun(run);
   agentPollFailures = 0;
@@ -878,10 +963,18 @@ function beginTrackingAgentRun(run, { statusText = '', immediate = false, keepSu
   if (getAgentRunMode(run) === 'suggest') {
     renderSuggestPending(message, { clearExisting: !keepSuggestResult });
     setAgentChatStatus('An authority suggestion is in progress for this document.', 'neutral');
+    restoreIdleEditStatus();
+  } else if (getAgentRunMode(run) === 'edit') {
+    renderEditPending(message, { clearExisting: !keepEditResult });
+    setAgentChatStatus('An edit proposal is in progress for this document.', 'neutral');
+    restoreIdleSuggestStatus();
   } else {
     setAgentChatStatus(message, 'neutral');
     if (!agentLatestSuggestResult) {
       setSuggestStatus('A chat run is in progress. Wait for it to finish before starting a new suggestion.', 'neutral');
+    }
+    if (!agentLatestEditResult) {
+      setEditStatus('A chat run is in progress. Wait for it to finish before starting a new edit proposal.', 'neutral');
     }
   }
 
@@ -896,13 +989,18 @@ function finishAgentRun(run) {
 
   if (getAgentRunMode(run) === 'suggest') {
     setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
+    restoreIdleEditStatus();
+  } else if (getAgentRunMode(run) === 'edit') {
+    setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
+    restoreIdleSuggestStatus();
   } else {
     restoreIdleSuggestStatus();
+    restoreIdleEditStatus();
   }
 }
 
 function completeAgentRun(run, payload) {
-  const mode = getAgentRunMode(run) || (extractSuggestResult(payload) ? 'suggest' : 'chat');
+  const mode = getAgentRunMode(run) || (extractSuggestResult(payload) ? 'suggest' : (extractEditResult(payload) ? 'edit' : 'chat'));
   if (mode === 'suggest') {
     const suggestResult = extractSuggestResult(payload);
     finishAgentRun(run);
@@ -912,6 +1010,18 @@ function completeAgentRun(run, payload) {
       setSuggestStatus('Authorities ready.', 'success');
     } else {
       renderSuggestError('The suggestion run completed without a structured result.');
+    }
+    return;
+  }
+  if (mode === 'edit') {
+    const editResult = extractEditResult(payload);
+    finishAgentRun(run);
+    if (editResult) {
+      agentLatestEditResult = editResult;
+      renderEditResponse(editResult);
+      setEditStatus('Edit proposal ready.', 'success');
+    } else {
+      renderEditError('The edit run completed without a structured proposal.');
     }
     return;
   }
@@ -932,6 +1042,10 @@ function failAgentRun(run, message, tone = 'error') {
   finishAgentRun(run);
   if (mode === 'suggest') {
     renderSuggestError(message);
+    return;
+  }
+  if (mode === 'edit') {
+    renderEditError(message);
     return;
   }
   setAgentChatStatus(message, tone);
@@ -959,6 +1073,8 @@ async function pollAgentRun(runId = agentActiveRunId) {
       if (agentPollFailures < AGENT_MAX_POLL_FAILURES && isAgentRunActive(agentActiveRun)) {
         if (getAgentRunMode(agentActiveRun) === 'suggest') {
           setSuggestStatus(`${message} Retrying...`, 'neutral');
+        } else if (getAgentRunMode(agentActiveRun) === 'edit') {
+          setEditStatus(`${message} Retrying...`, 'neutral');
         } else {
           setAgentChatStatus(`${message} Retrying...`, 'neutral');
         }
@@ -984,8 +1100,11 @@ async function pollAgentRun(runId = agentActiveRunId) {
 
     if (isAgentRunActive(run)) {
       const keepSuggestResult = getAgentRunMode(run) === 'suggest' && Boolean(agentLatestSuggestResult);
+      const keepEditResult = getAgentRunMode(run) === 'edit' && Boolean(agentLatestEditResult);
       if (getAgentRunMode(run) === 'suggest') {
         renderSuggestPending(pendingRunStatusText(run), { clearExisting: !keepSuggestResult });
+      } else if (getAgentRunMode(run) === 'edit') {
+        renderEditPending(pendingRunStatusText(run), { clearExisting: !keepEditResult });
       } else {
         setAgentChatStatus(pendingRunStatusText(run), 'neutral');
       }
@@ -1010,6 +1129,8 @@ async function pollAgentRun(runId = agentActiveRunId) {
     if (agentPollFailures < AGENT_MAX_POLL_FAILURES && isAgentRunActive(agentActiveRun)) {
       if (getAgentRunMode(agentActiveRun) === 'suggest') {
         setSuggestStatus(`${message} Retrying...`, 'neutral');
+      } else if (getAgentRunMode(agentActiveRun) === 'edit') {
+        setEditStatus(`${message} Retrying...`, 'neutral');
       } else {
         setAgentChatStatus(`${message} Retrying...`, 'neutral');
       }
@@ -1044,11 +1165,21 @@ async function loadAgentSession() {
       setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
     }
 
+    const latestEditResult = extractEditResult(data.latest_edit_run || null);
+    if (latestEditResult) {
+      agentLatestEditResult = latestEditResult;
+      renderEditResponse(latestEditResult);
+      restoreIdleEditStatus();
+    } else if (!agentLatestEditResult) {
+      setEditStatus(AGENT_DEFAULT_EDIT_STATUS, 'neutral');
+    }
+
     const activeRun = data.active_run || null;
     if (isAgentRunActive(activeRun)) {
       beginTrackingAgentRun(activeRun, {
         immediate: true,
         keepSuggestResult: Boolean(agentLatestSuggestResult),
+        keepEditResult: Boolean(agentLatestEditResult),
       });
       return;
     }
@@ -1058,6 +1189,7 @@ async function loadAgentSession() {
     syncAgentControls();
     setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
     restoreIdleSuggestStatus();
+    restoreIdleEditStatus();
   } catch (error) {
     setAgentChatStatus(error?.message || 'Unable to load the agent session.', 'error');
   }
@@ -1069,9 +1201,15 @@ function showExistingActiveRunMessage(fallbackMessage) {
   if (getAgentRunMode(agentActiveRun) === 'suggest') {
     setSuggestStatus(message, 'neutral');
     setAgentChatStatus('An authority suggestion is already in progress. Waiting for it to finish.', 'neutral');
+    restoreIdleEditStatus();
+  } else if (getAgentRunMode(agentActiveRun) === 'edit') {
+    setEditStatus(message, 'neutral');
+    setAgentChatStatus('An edit proposal is already in progress. Waiting for it to finish.', 'neutral');
+    restoreIdleSuggestStatus();
   } else {
     setAgentChatStatus(message, 'neutral');
     setSuggestStatus('A chat run is already in progress. Wait for it to finish before starting a new suggestion.', 'neutral');
+    setEditStatus('A chat run is already in progress. Wait for it to finish before starting a new edit proposal.', 'neutral');
   }
   scheduleAgentPoll(0);
 }
@@ -1169,10 +1307,12 @@ async function resetAgentSession() {
 
 function refreshResearchSelectionDisplays() {
   const selection = getCurrentResearchSelection();
+  const liveSelection = getLiveSelectionSnapshot().text;
   document.getElementById('suggest-selection-preview').textContent = selection || 'Select text in the editor to focus the suggestion.';
   document.getElementById('agent-chat-selection-hint').textContent = selection
     ? `Including current selection (${Math.min(selection.length, 220)} chars) when you send.`
     : 'Current selection will be included when available.';
+  document.getElementById('edit-selection-preview').textContent = liveSelection || 'Select text in the editor to revise it, or leave nothing selected to draft new language.';
 }
 
 function authorityBadges(item) {
@@ -1258,6 +1398,212 @@ function renderSuggestResponse(payload) {
   results.querySelectorAll('.open-authority-case').forEach(btn => btn.addEventListener('click', () => openCase(btn.dataset.id)));
 }
 
+function renderEditPlaceholder(message, tone = 'neutral') {
+  const node = document.getElementById('agent-edit-result');
+  const classes = tone === 'error'
+    ? 'text-red-700 border border-red-200 bg-red-50'
+    : 'text-gray-500 border bg-gray-50';
+  node.innerHTML = `<div class="text-xs rounded p-2 ${classes}">${escapeHtml(message)}</div>`;
+}
+
+function renderEditPending(message, { clearExisting = true } = {}) {
+  setEditStatus(message, 'neutral');
+  if (clearExisting) {
+    renderEditPlaceholder(message, 'neutral');
+  }
+}
+
+function renderEditError(message) {
+  renderEditPlaceholder(message || 'Unable to prepare an edit right now.', 'error');
+  setEditStatus(message || 'Unable to prepare an edit right now.', 'error');
+}
+
+function normalizeSelectionText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function operationLabel(operation) {
+  if (operation === 'replace_selection') return 'Replace selection';
+  if (operation === 'insert_after_selection') return 'Insert after selection';
+  if (operation === 'delete_selection') return 'Delete selection';
+  return 'Append to document';
+}
+
+function paragraphNodeFromText(block) {
+  const lines = String(block || '').split('\n');
+  const content = [];
+  lines.forEach((line, index) => {
+    if (line) {
+      content.push({ type: 'text', text: line });
+    }
+    if (index < lines.length - 1) {
+      content.push({ type: 'hardBreak' });
+    }
+  });
+  return content.length ? { type: 'paragraph', content } : { type: 'paragraph' };
+}
+
+function tiptapNodesFromPlainText(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [{ type: 'paragraph' }];
+  return normalized
+    .split(/\n{2,}/)
+    .map(block => paragraphNodeFromText(block));
+}
+
+function resolveEditTargetRange(result) {
+  if (!result || result.operation === 'append_to_document') {
+    return null;
+  }
+
+  const expected = normalizeSelectionText(result.selected_text || result.target_text);
+  const liveSelection = getLiveSelectionSnapshot();
+  if (liveSelection.text && (!expected || normalizeSelectionText(liveSelection.text) === expected)) {
+    return { from: liveSelection.from, to: liveSelection.to };
+  }
+
+  const from = Number.isInteger(result.selection_from) ? result.selection_from : null;
+  const to = Number.isInteger(result.selection_to) ? result.selection_to : null;
+  if (from !== null && to !== null && to >= from) {
+    try {
+      const textAtRange = editor.state.doc.textBetween(from, to, ' ').trim();
+      if (!expected || normalizeSelectionText(textAtRange) === expected) {
+        return { from, to };
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function applyEditOperationLocally(result) {
+  const beforeContent = editor.getJSON();
+  let applied = false;
+  try {
+    if (result.operation === 'append_to_document') {
+      editor.chain().focus(editor.state.doc.content.size).insertContent(
+        tiptapNodesFromPlainText(result.proposed_text || '')
+      ).run();
+    } else {
+      const range = resolveEditTargetRange(result);
+      if (!range) {
+        throw new Error('Select the exact passage you want the agent to edit, then apply the proposal again.');
+      }
+      if (result.operation === 'delete_selection') {
+        editor.chain().focus().deleteRange(range).run();
+      } else if (result.operation === 'replace_selection') {
+        editor.chain().focus().insertContentAt(range, tiptapNodesFromPlainText(result.proposed_text || '')).run();
+      } else if (result.operation === 'insert_after_selection') {
+        editor.chain().focus().insertContentAt(range.to, tiptapNodesFromPlainText(result.proposed_text || '')).run();
+      } else {
+        throw new Error('Unsupported edit operation returned by the agent.');
+      }
+    }
+    applied = true;
+    return {
+      currentContent: beforeContent,
+      newContent: editor.getJSON(),
+    };
+  } finally {
+    if (!applied) {
+      editor.commands.setContent(beforeContent);
+    }
+  }
+}
+
+async function applyAgentEdit(result) {
+  if (!result?.run_id) {
+    renderEditError('The edit proposal is missing its run id.');
+    return;
+  }
+  if (result.applied_at) {
+    setEditStatus('This edit proposal has already been applied.', 'neutral');
+    return;
+  }
+
+  let payload;
+  try {
+    payload = applyEditOperationLocally(result);
+  } catch (error) {
+    renderEditError(error?.message || 'Unable to apply that edit proposal.');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/research/agent/edit/apply/${docId}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({
+        run_id: result.run_id,
+        current_content: payload.currentContent,
+        new_content: payload.newContent,
+      }),
+    });
+    const data = await readApiPayload(res);
+    if (!res.ok) {
+      editor.commands.setContent(payload.currentContent);
+      renderEditError(extractAgentError(data, 'Unable to apply the edit proposal.'));
+      return;
+    }
+
+    clearTimeout(saveTimeout);
+    saveStatus.textContent = 'Saved';
+    agentLatestEditResult = extractEditResult(data) || { ...result, applied_at: new Date().toISOString() };
+    renderEditResponse(agentLatestEditResult);
+    setEditStatus('Edit applied and pre-edit snapshot saved.', 'success');
+    refreshResearchSelectionDisplays();
+  } catch (error) {
+    editor.commands.setContent(payload.currentContent);
+    renderEditError(error?.message || 'Unable to apply the edit proposal.');
+  }
+}
+
+function renderEditResponse(result) {
+  if (!result) {
+    renderEditError('The edit run completed without a structured proposal.');
+    return;
+  }
+
+  const node = document.getElementById('agent-edit-result');
+  const targetText = result.target_text || result.selected_text || '';
+  const proposedText = result.operation === 'delete_selection'
+    ? '[The agent proposes deleting the targeted text.]'
+    : (result.proposed_text || '');
+  const sourceSummary = toolSourceSummary(result.tool_calls || []);
+  const appliedMarkup = result.applied_at
+    ? `<div class="text-[11px] text-green-700">Applied at ${escapeHtml(new Date(result.applied_at).toLocaleString())}</div>`
+    : '';
+
+  node.innerHTML = `
+    <div class="border rounded p-3 bg-white space-y-3">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-sm font-semibold text-navy">${escapeHtml(result.edit_summary || 'Proposed edit')}</div>
+          <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(operationLabel(result.operation))}</div>
+          ${appliedMarkup}
+        </div>
+        <button id="apply-agent-edit" class="px-3 py-1 text-xs rounded ${result.applied_at ? 'border text-gray-400 cursor-not-allowed' : 'bg-gold text-navy'}" ${result.applied_at ? 'disabled' : ''}>${result.applied_at ? 'Applied' : 'Apply Edit'}</button>
+      </div>
+      ${result.rationale ? `<div class="text-xs text-gray-700"><span class="font-semibold">Why:</span> ${escapeHtml(result.rationale)}</div>` : ''}
+      ${targetText ? `<div class="text-xs text-gray-700"><span class="font-semibold">Target:</span><div class="mt-1 whitespace-pre-wrap rounded bg-gray-50 border p-2">${escapeHtml(targetText)}</div></div>` : ''}
+      <div class="text-xs text-gray-700">
+        <span class="font-semibold">Proposed text:</span>
+        <pre class="mt-1 whitespace-pre-wrap rounded bg-gray-50 border p-2 text-[11px]">${escapeHtml(proposedText)}</pre>
+      </div>
+      ${result.notes ? `<div class="text-xs text-gray-600">${escapeHtml(result.notes)}</div>` : ''}
+      ${sourceSummary ? `<div class="text-[11px] text-gray-500">${escapeHtml(sourceSummary)}</div>` : ''}
+      ${result.selection_required ? '<div class="text-[11px] text-gray-500">If the document changed since the proposal was drafted, reselect the target passage before applying.</div>' : ''}
+    </div>
+  `;
+
+  const applyButton = document.getElementById('apply-agent-edit');
+  if (applyButton && !result.applied_at) {
+    applyButton.addEventListener('click', () => applyAgentEdit(result));
+  }
+}
+
 async function runAgentSuggest() {
   if (agentBusy) {
     showExistingActiveRunMessage('Another agent run is already active. Waiting for it to finish.');
@@ -1319,6 +1665,70 @@ async function runAgentSuggest() {
   }
 }
 
+async function runAgentEdit() {
+  if (agentBusy) {
+    showExistingActiveRunMessage('Another agent run is already active. Waiting for it to finish.');
+    return;
+  }
+
+  const instruction = document.getElementById('agent-edit-input').value.trim();
+  if (!instruction) {
+    renderEditError('Tell the agent what to change first.');
+    return;
+  }
+
+  const selection = getLiveSelectionSnapshot();
+  renderEditPending('Reviewing the draft and drafting the proposed edit...');
+
+  try {
+    const res = await fetch(`/api/research/agent/edit/${docId}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+      body: JSON.stringify({
+        instruction,
+        selected_text: selection.text || '',
+        selection_from: selection.text ? selection.from : null,
+        selection_to: selection.text ? selection.to : null,
+      }),
+    });
+    const data = await readApiPayload(res);
+    if (res.status === 409 && data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: data.error || 'Another agent run is already active. Resuming it.',
+        immediate: true,
+        keepEditResult: Boolean(agentLatestEditResult),
+      });
+      return;
+    }
+
+    if (!res.ok) {
+      renderEditError(extractAgentError(data, 'Unable to prepare an edit right now.'));
+      return;
+    }
+
+    if (data.run) {
+      beginTrackingAgentRun(data.run, {
+        statusText: 'Reviewing the draft and drafting the proposed edit...',
+        immediate: true,
+        keepEditResult: false,
+      });
+      return;
+    }
+
+    const immediateResult = extractEditResult(data);
+    if (immediateResult) {
+      agentLatestEditResult = immediateResult;
+      renderEditResponse(immediateResult);
+      setEditStatus('Edit proposal ready.', 'success');
+      return;
+    }
+
+    renderEditError('The edit service did not return a run or a structured proposal.');
+  } catch (error) {
+    renderEditError(error?.message || 'Unable to reach the edit service right now.');
+  }
+}
+
 function setTab(tabName) {
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.remove('tab-btn-active');
@@ -1327,11 +1737,13 @@ function setTab(tabName) {
 
   const chatPanel = document.getElementById('chat-panel');
   const suggestPanel = document.getElementById('suggest-panel');
+  const editPanel = document.getElementById('edit-panel');
   const exemplarPanel = document.getElementById('exemplar-panel');
   const exemplarResults = document.getElementById('exemplar-results');
 
   chatPanel.classList.add('hidden');
   suggestPanel.classList.add('hidden');
+  editPanel.classList.add('hidden');
   exemplarPanel.classList.add('hidden');
   exemplarResults.classList.add('hidden');
 
@@ -1349,6 +1761,12 @@ function setTab(tabName) {
     suggestPanel.classList.remove('hidden');
     refreshResearchSelectionDisplays();
   }
+  if (tabName === 'edit') {
+    document.getElementById('tab-edit').classList.add('tab-btn-active');
+    document.getElementById('tab-edit').classList.remove('border');
+    editPanel.classList.remove('hidden');
+    refreshResearchSelectionDisplays();
+  }
   if (tabName === 'exemplars') {
     document.getElementById('tab-exemplars').classList.add('tab-btn-active');
     document.getElementById('tab-exemplars').classList.remove('border');
@@ -1364,18 +1782,29 @@ document.getElementById('agent-send').addEventListener('click', sendAgentMessage
 document.getElementById('agent-reset').addEventListener('click', resetAgentSession);
 document.getElementById('tab-chat').addEventListener('click', () => setTab('chat'));
 document.getElementById('tab-suggest').addEventListener('click', () => setTab('suggest'));
+document.getElementById('tab-edit').addEventListener('click', () => setTab('edit'));
 document.getElementById('tab-exemplars').addEventListener('click', () => setTab('exemplars'));
 document.getElementById('refresh-suggest-selection').addEventListener('click', refreshResearchSelectionDisplays);
+document.getElementById('refresh-edit-selection').addEventListener('click', refreshResearchSelectionDisplays);
 document.getElementById('run-agent-suggest').addEventListener('click', runAgentSuggest);
+document.getElementById('run-agent-edit').addEventListener('click', runAgentEdit);
 document.getElementById('agent-chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendAgentMessage();
   }
 });
+document.getElementById('agent-edit-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    runAgentEdit();
+  }
+});
 refreshResearchSelectionDisplays();
 setAgentChatStatus(AGENT_DEFAULT_CHAT_STATUS, 'neutral');
 setSuggestStatus(AGENT_DEFAULT_SUGGEST_STATUS, 'neutral');
+setEditStatus(AGENT_DEFAULT_EDIT_STATUS, 'neutral');
+renderEditPlaceholder('Select text to revise or describe new language to draft.', 'neutral');
 syncAgentControls();
 
 function exemplarCard(item) {
@@ -2098,7 +2527,7 @@ document.addEventListener('click', (e) => {
   hideSlashMenu();
 });
 
-setTab('search');
+setTab('chat');
 normalizeFootnotes();
 updateToolbar();
 </script>

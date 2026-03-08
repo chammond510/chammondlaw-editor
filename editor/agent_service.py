@@ -152,6 +152,32 @@ Return an object with this exact shape:
 }
 """
 
+_EDIT_SYSTEM_PROMPT = """You are Hammond Law's document editing agent for immigration drafting.
+You work inside a live draft and may research before proposing a controlled edit.
+
+Hard rules:
+1. Read the current document context and any selected text before proposing an edit.
+2. Use BIA Edge first for legal authorities. Use knowledge tools for internal style and prior work product. Use web search only when freshness matters or the user explicitly asks for it.
+3. Do not invent citations, quoted language, legal standards, or case support.
+4. Propose one concrete edit only. Do not rewrite the whole document unless the user explicitly asks for that and the operation is append_to_document.
+5. The final answer must be valid JSON only. No markdown fences and no prose outside the JSON object.
+6. proposed_text must be plain drafting text, preserving paragraph breaks but not markdown formatting.
+7. If selected text was provided, use it as the target for replace_selection, insert_after_selection, or delete_selection.
+8. If no selected text was provided, do not use replace_selection, insert_after_selection, or delete_selection. Use append_to_document instead.
+9. Honor the Turn requirements block in the input. If exact quotes are required, verify them before drafting the edit.
+10. Once you have enough verified support to propose the edit, stop calling tools and return the JSON object.
+
+Return an object with this exact shape:
+{
+  "edit_summary": "short summary of the proposed change",
+  "rationale": "why this change improves the draft",
+  "operation": "replace_selection | insert_after_selection | append_to_document | delete_selection",
+  "target_text": "the text being revised or removed, or an empty string for append_to_document",
+  "proposed_text": "the exact text to insert; may be empty only for delete_selection",
+  "notes": "optional implementation note or drafting caveat"
+}
+"""
+
 
 class AgentConfigurationError(ValueError):
     pass
@@ -182,6 +208,20 @@ class SuggestAgentResult:
     authorities: list[dict[str, Any]]
     search_notes: str
     next_questions: list[str]
+    response_id: str
+    tool_calls: list[dict[str, Any]]
+    citations: list[dict[str, Any]]
+    raw_answer: str
+
+
+@dataclass
+class EditAgentResult:
+    edit_summary: str
+    rationale: str
+    operation: str
+    target_text: str
+    proposed_text: str
+    notes: str
     response_id: str
     tool_calls: list[dict[str, Any]]
     citations: list[dict[str, Any]]
@@ -889,6 +929,54 @@ def _normalize_authorities(items: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+_EDIT_OPERATIONS = {
+    "replace_selection",
+    "insert_after_selection",
+    "append_to_document",
+    "delete_selection",
+}
+
+
+def _structured_result_failure_message(mode: str) -> str:
+    if mode == "edit":
+        return "The agent did not return valid structured edit data."
+    return "The agent did not return valid structured suggestion data."
+
+
+def _normalize_edit_operation(value: Any, *, has_selected_text: bool) -> str:
+    operation = str(value or "").strip().lower()
+    if operation not in _EDIT_OPERATIONS:
+        operation = "replace_selection" if has_selected_text else "append_to_document"
+    if not has_selected_text and operation != "append_to_document":
+        operation = "append_to_document"
+    return operation
+
+
+def _normalize_edit_result(payload: Any, *, request_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    selected_text = str(request_payload.get("selected_text") or "").strip()
+    has_selected_text = bool(selected_text)
+    operation = _normalize_edit_operation(payload.get("operation"), has_selected_text=has_selected_text)
+    return {
+        "edit_summary": str(payload.get("edit_summary") or payload.get("summary") or "").strip(),
+        "rationale": str(payload.get("rationale") or "").strip(),
+        "operation": operation,
+        "target_text": str(payload.get("target_text") or selected_text).strip(),
+        "proposed_text": str(
+            payload.get("proposed_text")
+            or payload.get("replacement_text")
+            or payload.get("text")
+            or ""
+        ).strip(),
+        "notes": str(payload.get("notes") or payload.get("search_notes") or "").strip(),
+        "selected_text": selected_text,
+        "selection_from": _coerce_int(request_payload.get("selection_from")),
+        "selection_to": _coerce_int(request_payload.get("selection_to")),
+    }
+
+
 class DocumentResearchAgent:
     def __init__(self, *, document, user):
         self.document = document
@@ -1042,6 +1130,44 @@ class DocumentResearchAgent:
         )
         return self._attach_started_response(run=run, response=response, stage="waiting_openai")
 
+    def start_edit_run(
+        self,
+        *,
+        run: DocumentResearchRun,
+        instruction: str,
+        selected_text: str = "",
+        selection_from: int | None = None,
+        selection_to: int | None = None,
+    ) -> DocumentResearchRun:
+        normalized_instruction = (instruction or "").strip()
+        if not normalized_instruction:
+            raise AgentExecutionError("An edit instruction is required.")
+
+        normalized_selected = (selected_text or "").strip()
+        run.mode = "edit"
+        run.request_payload = {
+            "instruction": normalized_instruction,
+            "selected_text": normalized_selected,
+            "selection_from": selection_from,
+            "selection_to": selection_to,
+        }
+        run.previous_response_id = ""
+        run.metadata = self._initial_run_metadata(mode="edit", previous_response_id="")
+
+        response = self._create_background_response(
+            instructions=_EDIT_SYSTEM_PROMPT,
+            input_payload=self._edit_input(
+                instruction=normalized_instruction,
+                selected_text=normalized_selected,
+            ),
+            tools=self._build_tools(mode="edit", include_mcp=True),
+            previous_response_id=None,
+            tool_choice="auto",
+            max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+            mode="edit",
+        )
+        return self._attach_started_response(run=run, response=response, stage="waiting_openai")
+
     def advance_run(self, *, run: DocumentResearchRun) -> DocumentResearchRun:
         if run.status in _TERMINAL_RUN_STATUSES:
             return run
@@ -1110,7 +1236,7 @@ class DocumentResearchAgent:
         if not answer:
             return self._queue_force_final_response(run=run, response=response)
 
-        if run.mode == "chat":
+        if run.mode in {"chat", "edit"}:
             missing_sources = self._missing_full_text_sources_for_run(run=run)
             if missing_sources and not bool((run.metadata or {}).get("quote_source_verification_attempted")):
                 return self._queue_quote_source_verification(
@@ -1121,6 +1247,8 @@ class DocumentResearchAgent:
 
         if run.mode == "suggest":
             return self._finalize_suggest_run(run=run, response=response, answer=answer)
+        if run.mode == "edit":
+            return self._finalize_edit_run(run=run, response=response, answer=answer)
         return self._finalize_chat_run(run=run, response=response, answer=answer)
 
     def cancel_run(
@@ -1283,7 +1411,7 @@ class DocumentResearchAgent:
         )
 
     def _build_tools(self, *, mode: str, include_mcp: bool = True) -> list[dict[str, Any]]:
-        allowed_tools = _BIAEDGE_CHAT_TOOLS if mode == "chat" else _BIAEDGE_SUGGEST_TOOLS
+        allowed_tools = _BIAEDGE_SUGGEST_TOOLS if mode == "suggest" else _BIAEDGE_CHAT_TOOLS
         tools = [_build_web_search_tool()]
         if self.has_active_exemplars:
             tools.extend(_knowledge_function_tools())
@@ -1315,6 +1443,7 @@ class DocumentResearchAgent:
     def _request_text(self, *, request_payload: dict[str, Any]) -> str:
         parts = [
             str(request_payload.get("message") or "").strip(),
+            str(request_payload.get("instruction") or "").strip(),
             str(request_payload.get("focus_note") or "").strip(),
         ]
         return "\n".join(part for part in parts if part)
@@ -1380,11 +1509,10 @@ class DocumentResearchAgent:
     def _queue_quote_source_verification(self, *, run: DocumentResearchRun, response: Any, missing_sources: list[str]) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
         if metadata.get("quote_source_verification_attempted"):
-            return self._finalize_chat_run(
-                run=run,
-                response=response,
-                answer=self._assembled_answer(run=run, response=response, answer=_extract_output_text(response)),
-            )
+            answer = self._assembled_answer(run=run, response=response, answer=_extract_output_text(response))
+            if run.mode == "edit":
+                return self._finalize_edit_run(run=run, response=response, answer=answer)
+            return self._finalize_chat_run(run=run, response=response, answer=answer)
 
         metadata["quote_source_verification_attempted"] = True
         run.metadata = metadata
@@ -1420,6 +1548,8 @@ class DocumentResearchAgent:
     def _run_instructions(self, run: DocumentResearchRun) -> str:
         if run.mode == "suggest":
             return _SUGGEST_SYSTEM_PROMPT
+        if run.mode == "edit":
+            return _EDIT_SYSTEM_PROMPT
         if self._run_include_mcp(run):
             return _CHAT_SYSTEM_PROMPT
         return self._chat_fallback_instructions()
@@ -1820,7 +1950,7 @@ class DocumentResearchAgent:
     def _queue_json_repair(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
         if metadata.get("json_repair_attempted"):
-            return self._mark_run_failed(run, "The agent did not return valid structured suggestion data.")
+            return self._mark_run_failed(run, _structured_result_failure_message(run.mode))
 
         metadata["json_repair_attempted"] = True
         run.metadata = metadata
@@ -1885,6 +2015,32 @@ class DocumentResearchAgent:
             "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
             "raw_answer": answer,
+        }
+        return self._mark_run_completed(run, result_payload=result_payload, response=response)
+
+    def _finalize_edit_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
+        parsed = _extract_json_object(answer)
+        if parsed is None:
+            return self._queue_json_repair(run=run, response=response)
+
+        normalized = _normalize_edit_result(parsed, request_payload=run.request_payload or {})
+        if not normalized:
+            return self._mark_run_failed(run, _structured_result_failure_message(run.mode))
+        if normalized["operation"] != "delete_selection" and not normalized["proposed_text"]:
+            return self._queue_json_repair(run=run, response=response)
+
+        result_payload = {
+            **normalized,
+            "selection_required": normalized["operation"] != "append_to_document",
+            "response_id": (getattr(response, "id", "") or "").strip(),
+            "tool_calls": _public_tool_calls(run.tool_calls or []),
+            "citations": run.citations or [],
+            "used_tools": _used_tools(run.tool_calls or []),
+            "raw_answer": answer,
+            "metadata": {
+                "model": (run.metadata or {}).get("model", AGENT_MODEL),
+                "reasoning_effort": (run.metadata or {}).get("reasoning_effort", AGENT_REASONING_EFFORT),
+            },
         }
         return self._mark_run_completed(run, result_payload=result_payload, response=response)
 
@@ -1959,7 +2115,11 @@ class DocumentResearchAgent:
         request_payload = run.request_payload or {}
         selected_text = str(request_payload.get("selected_text") or "").strip()
         focus_note = str(request_payload.get("focus_note") or "").strip()
-        attorney_message = str(request_payload.get("message") or "").strip()
+        attorney_message = str(
+            request_payload.get("message")
+            or request_payload.get("instruction")
+            or ""
+        ).strip()
         request_text = self._request_text(request_payload=request_payload)
         request_requirements = _request_requirements_block(request_text)
         document_type = self.document.document_type.name if self.document.document_type else "Unknown"
@@ -1990,6 +2150,15 @@ class DocumentResearchAgent:
                     "",
                     "Task:",
                     "Return the final structured authority suggestion now using only the verified research above. Do not call any tools.",
+                ]
+            )
+        elif run.mode == "edit":
+            parts.extend(
+                [
+                    "",
+                    "Task:",
+                    "Return the final structured edit proposal now using only the verified research above. "
+                    "Do not call any tools. Return valid JSON only.",
                 ]
             )
         else:
@@ -2068,6 +2237,24 @@ class DocumentResearchAgent:
         if request_requirements:
             blocks.append(request_requirements)
         blocks.append("Task:\nSuggest the best authorities for the selected passage in this document.")
+        return "\n\n".join(block for block in blocks if block).strip()
+
+    def _edit_input(self, *, instruction: str, selected_text: str = "") -> str:
+        blocks = [
+            self._document_context_block(mode="edit", selected_text=selected_text),
+        ]
+        request_requirements = _request_requirements_block(instruction)
+        if request_requirements:
+            blocks.append(request_requirements)
+        if selected_text:
+            blocks.append(
+                "Edit target:\nUse the selected text as the exact target for any replace, insert-after, or delete operation."
+            )
+        else:
+            blocks.append(
+                "Edit target:\nNo text is currently selected. If you draft new language, use append_to_document."
+            )
+        blocks.append("User edit instruction:\n" + instruction.strip())
         return "\n\n".join(block for block in blocks if block).strip()
 
     def _transcript_block(self, transcript_messages: list[Any]) -> str:

@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .agent_service import AgentConfigurationError, AgentExecutionError, DocumentResearchAgent
-from .models import Document, DocumentResearchMessage, DocumentResearchRun, DocumentResearchSession
+from .models import Document, DocumentResearchMessage, DocumentResearchRun, DocumentResearchSession, DocumentVersion
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,11 @@ def agent_session(request, doc_id):
         .order_by("-completed_at", "-created_at")
         .first()
     )
+    latest_edit_run = (
+        session.runs.filter(mode="edit", status="completed")
+        .order_by("-completed_at", "-created_at")
+        .first()
+    )
     return JsonResponse(
         {
             "session": {
@@ -166,6 +171,7 @@ def agent_session(request, doc_id):
             "messages": messages,
             "active_run": _serialize_run(active_run) if active_run else None,
             "latest_suggest_run": _serialize_run(latest_suggest_run, include_result=True) if latest_suggest_run else None,
+            "latest_edit_run": _serialize_run(latest_edit_run, include_result=True) if latest_edit_run else None,
         }
     )
 
@@ -336,6 +342,145 @@ def agent_suggest(request, doc_id):
 
 
 @login_required
+@require_POST
+def agent_edit(request, doc_id):
+    document = get_object_or_404(Document, id=doc_id, created_by=request.user)
+
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON payload."}, status=400)
+
+    instruction = (data.get("instruction") or "").strip()
+    selected_text = (data.get("selected_text") or "").strip()
+    selection_from = data.get("selection_from")
+    selection_to = data.get("selection_to")
+    if not instruction:
+        return JsonResponse({"error": "instruction is required"}, status=400)
+
+    with transaction.atomic():
+        session = _get_session_for_document(user=request.user, document=document)
+        session = DocumentResearchSession.objects.select_for_update().get(id=session.id)
+        active_run = _get_active_run(session)
+        if active_run:
+            return JsonResponse(
+                {
+                    "error": "Another research agent task is already running for this document.",
+                    "run": _serialize_run(active_run),
+                },
+                status=409,
+            )
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="queued",
+            stage="queued",
+        )
+
+    try:
+        agent = DocumentResearchAgent(document=document, user=request.user)
+        run = agent.start_edit_run(
+            run=run,
+            instruction=instruction,
+            selected_text=selected_text,
+            selection_from=selection_from,
+            selection_to=selection_to,
+        )
+    except AgentConfigurationError as exc:
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=503)
+    except AgentExecutionError as exc:
+        _mark_run_start_failure(run, str(exc))
+        return JsonResponse({"error": str(exc), "run": _serialize_run(run)}, status=502)
+    except Exception:
+        logger.exception(
+            "Unexpected document agent edit start failure",
+            extra={"document_id": str(document.id), "user_id": request.user.id, "run_id": str(run.public_id)},
+        )
+        _mark_run_start_failure(run, "The agent failed unexpectedly while starting.")
+        return JsonResponse(
+            {"error": "The agent failed unexpectedly while starting.", "run": _serialize_run(run)},
+            status=500,
+        )
+
+    return JsonResponse({"run": _serialize_run(run)}, status=202)
+
+
+@login_required
+@require_POST
+def agent_apply_edit(request, doc_id):
+    document = get_object_or_404(Document, id=doc_id, created_by=request.user)
+
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON payload."}, status=400)
+
+    run_id = str(data.get("run_id") or "").strip()
+    current_content = data.get("current_content")
+    new_content = data.get("new_content")
+    if not run_id:
+        return JsonResponse({"error": "run_id is required"}, status=400)
+    if not isinstance(current_content, dict) or not isinstance(new_content, dict):
+        return JsonResponse({"error": "current_content and new_content must be Tiptap JSON objects."}, status=400)
+    if current_content == new_content:
+        return JsonResponse({"error": "No document changes were provided."}, status=400)
+
+    with transaction.atomic():
+        run = get_object_or_404(
+            DocumentResearchRun.objects.select_for_update().select_related("session", "session__document"),
+            public_id=run_id,
+            session__user=request.user,
+            session__document=document,
+            session__document__created_by=request.user,
+        )
+        if run.mode != "edit":
+            return JsonResponse({"error": "That run is not an edit proposal."}, status=400)
+        if run.status != "completed":
+            return JsonResponse({"error": "The edit proposal is not ready to apply yet."}, status=409)
+
+        metadata = dict(run.metadata or {})
+        if metadata.get("applied_at"):
+            return JsonResponse({"error": "This edit proposal has already been applied."}, status=409)
+
+        result_payload = run.result_payload or {}
+        summary = str(result_payload.get("edit_summary") or "Agent edit").strip()
+        label = f"Before agent edit - {summary}"[:100]
+        version = DocumentVersion.objects.create(
+            document=document,
+            content=current_content,
+            label=label,
+        )
+
+        document.content = new_content
+        document.save(update_fields=["content", "updated_at"])
+
+        metadata["applied_at"] = timezone.now().isoformat()
+        metadata["applied_snapshot_id"] = version.id
+        run.metadata = metadata
+        result_payload = dict(run.result_payload or {})
+        result_payload["applied_at"] = metadata["applied_at"]
+        run.result_payload = result_payload
+        run.save(update_fields=["metadata", "result_payload", "updated_at"])
+
+    return JsonResponse(
+        {
+            "status": "ok",
+            "updated_at": document.updated_at.isoformat(),
+            "version": {
+                "id": version.id,
+                "label": version.label,
+                "created_at": version.created_at.isoformat(),
+            },
+            "edit_result": {
+                **(run.result_payload or {}),
+                "run_id": str(run.public_id),
+            },
+        }
+    )
+
+
+@login_required
 @require_GET
 def agent_run_status(request, run_id):
     run = get_object_or_404(
@@ -396,13 +541,14 @@ def agent_run_status(request, run_id):
 
         return JsonResponse(
             {
-                "run": _serialize_run(run, include_result=run.mode == "suggest"),
+                "run": _serialize_run(run, include_result=run.mode in {"suggest", "edit"}),
                 "assistant_message": (
                     _serialize_message(assistant_message)
                     if assistant_message
                     else (_serialize_message(run.assistant_message) if run.assistant_message_id else fallback_assistant_message)
                 ),
                 "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
+                "edit_result": run.result_payload if run.mode == "edit" and run.status == "completed" else None,
             }
         )
     except Exception:
@@ -419,9 +565,10 @@ def agent_run_status(request, run_id):
         return JsonResponse(
             {
                 "error": "The agent run status could not be fully loaded.",
-                "run": _serialize_run(run, include_result=run.mode == "suggest"),
+                "run": _serialize_run(run, include_result=run.mode in {"suggest", "edit"}),
                 "assistant_message": fallback_assistant_message,
                 "suggest_result": run.result_payload if run.mode == "suggest" and run.status == "completed" else None,
+                "edit_result": run.result_payload if run.mode == "edit" and run.status == "completed" else None,
             },
             status=status,
         )

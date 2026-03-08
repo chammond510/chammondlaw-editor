@@ -175,6 +175,7 @@ class DocumentResearchRun(models.Model):
     MODE_CHOICES = [
         ("chat", "Chat"),
         ("suggest", "Suggest"),
+        ("edit", "Edit"),
     ]
     STATUS_CHOICES = [
         ("queued", "Queued"),
