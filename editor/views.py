@@ -2,6 +2,7 @@ import json
 import os
 from datetime import timedelta
 
+from django.contrib import messages
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse
@@ -10,7 +11,8 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .models import Document, DocumentType, DocumentVersion
 from .document_text import extract_plain_text
-from .export import tiptap_to_docx_with_style_anchor, tiptap_to_pdf
+from .export import tiptap_to_docx_with_style_anchor, tiptap_to_docx_with_template, tiptap_to_pdf
+from .import_service import import_docx_to_tiptap
 from .style_anchor_service import resolve_style_anchor_for_document
 
 
@@ -39,7 +41,11 @@ def new_document(request):
     for dt in types:
         cat = dt.get_category_display()
         categories.setdefault(cat, []).append(dt)
-    return render(request, "editor/new_document.html", {"categories": categories})
+    return render(
+        request,
+        "editor/new_document.html",
+        {"categories": categories, "document_types": types},
+    )
 
 
 @login_required
@@ -50,6 +56,51 @@ def create_document(request, type_slug):
         document_type=doc_type,
         content=doc_type.template_content,
         created_by=request.user,
+    )
+    return redirect("editor", doc_id=doc.id)
+
+
+@login_required
+@require_POST
+def import_document(request):
+    uploaded = request.FILES.get("file")
+    if not uploaded:
+        messages.error(request, "Select a Word file to import.")
+        return redirect("new_document")
+
+    filename = (uploaded.name or "").strip()
+    if not filename.lower().endswith(".docx"):
+        messages.error(request, "Only .docx files can be imported into the editor.")
+        return redirect("new_document")
+
+    type_slug = (request.POST.get("document_type") or "").strip()
+    doc_type = DocumentType.objects.filter(slug=type_slug).first()
+    if not doc_type:
+        messages.error(request, "Choose the document type for the imported draft.")
+        return redirect("new_document")
+
+    title = (request.POST.get("title") or "").strip()[:500]
+    if not title:
+        title = os.path.splitext(os.path.basename(filename))[0][:500] or f"Imported {doc_type.name}"
+
+    try:
+        content = import_docx_to_tiptap(uploaded)
+        uploaded.seek(0)
+    except Exception as exc:
+        messages.error(request, f"Unable to import that Word file: {exc}")
+        return redirect("new_document")
+
+    doc = Document.objects.create(
+        title=title,
+        document_type=doc_type,
+        content=content,
+        source_docx=uploaded,
+        created_by=request.user,
+    )
+    DocumentVersion.objects.create(
+        document=doc,
+        content=doc.content,
+        label="Imported from Word",
     )
     return redirect("editor", doc_id=doc.id)
 
@@ -112,17 +163,25 @@ def export_docx(request, doc_id):
     if doc.document_type:
         export_format = doc.document_type.export_format
 
-    style_anchor = resolve_style_anchor_for_document(
-        user=request.user,
-        document=doc,
-        export_format=export_format,
-    )
-    docx_buffer = tiptap_to_docx_with_style_anchor(
-        doc.content,
-        doc.title,
-        export_format,
-        style_anchor=style_anchor,
-    )
+    if doc.source_docx and doc.source_docx.name.lower().endswith(".docx"):
+        docx_buffer = tiptap_to_docx_with_template(
+            doc.content,
+            doc.title,
+            export_format,
+            template_path=doc.source_docx.path,
+        )
+    else:
+        style_anchor = resolve_style_anchor_for_document(
+            user=request.user,
+            document=doc,
+            export_format=export_format,
+        )
+        docx_buffer = tiptap_to_docx_with_style_anchor(
+            doc.content,
+            doc.title,
+            export_format,
+            style_anchor=style_anchor,
+        )
 
     filename = doc.title.replace(" ", "_")[:50] + ".docx"
     response = HttpResponse(

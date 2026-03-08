@@ -11,6 +11,7 @@ urlpatterns = [
     # Document operations
     path("new/", views.new_document, name="new_document"),
     path("create/<slug:type_slug>/", views.create_document, name="create_document"),
+    path("import/", views.import_document, name="import_document"),
     path("editor/<uuid:doc_id>/", views.editor, name="editor"),
     path("delete/<uuid:doc_id>/", views.delete_document, name="delete_document"),
     # API

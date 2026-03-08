@@ -1,12 +1,16 @@
 from unittest.mock import patch
 from io import BytesIO
 from types import SimpleNamespace
+import shutil
+import tempfile
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from docx import Document as DocxDocument
+from docx.shared import Inches
 
 from .agent_service import (
     AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
@@ -20,6 +24,7 @@ from .agent_service import (
     _request_requirements_block,
     _requested_full_text_sources,
 )
+from .import_service import import_docx_to_tiptap
 from .models import (
     Document,
     DocumentResearchMessage,
@@ -98,6 +103,35 @@ def _sample_cover_letter():
             {"type": "paragraph", "content": [{"type": "text", "text": "Attorney for Petitioner"}]},
         ],
     }
+
+
+def _build_docx_bytes(*, margin_inches=1.0):
+    doc = DocxDocument()
+    section = doc.sections[0]
+    section.left_margin = Inches(margin_inches)
+    section.right_margin = Inches(margin_inches)
+    doc.styles["Normal"].font.name = "Courier New"
+
+    heading = doc.add_heading("Imported Brief Heading", level=1)
+    heading.runs[0].bold = True
+
+    paragraph = doc.add_paragraph()
+    paragraph.add_run("This is a ")
+    paragraph.add_run("bold").bold = True
+    paragraph.add_run(" paragraph.")
+
+    bullet = doc.add_paragraph(style="List Bullet")
+    bullet.add_run("First exhibit item")
+
+    table = doc.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].paragraphs[0].add_run("Exhibit").bold = True
+    table.rows[0].cells[1].paragraphs[0].add_run("Description").bold = True
+    table.rows[1].cells[0].text = "A"
+    table.rows[1].cells[1].text = "Marriage certificate"
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
 
 
 class AgentResearchViewsTests(TestCase):
@@ -907,6 +941,95 @@ class AgentServiceTests(TestCase):
         self.assertEqual(request["instructions"], agent._run_instructions(run))
         self.assertIn("Turn requirements:", request["input_payload"])
         self.assertIn("missing_full_text_sources: policy, case_law", request["input_payload"])
+
+
+class DocumentImportTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._media_root = tempfile.mkdtemp(prefix="editor-import-tests-")
+        cls._override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="importer", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="Imported Brief",
+            slug="imported-brief",
+            category="brief",
+            export_format="court_brief",
+            description="Brief imported from Word",
+            icon="📘",
+        )
+
+    def test_import_docx_to_tiptap_preserves_basic_structure(self):
+        content = import_docx_to_tiptap(BytesIO(_build_docx_bytes()))
+        nodes = content.get("content", [])
+
+        self.assertEqual(content.get("type"), "doc")
+        self.assertEqual(nodes[0]["type"], "heading")
+        self.assertEqual(nodes[0]["attrs"]["level"], 1)
+        self.assertEqual(nodes[1]["type"], "paragraph")
+        self.assertEqual(nodes[2]["type"], "bulletList")
+        self.assertEqual(nodes[3]["type"], "table")
+
+    def test_import_document_creates_editable_document_with_source_docx(self):
+        upload = SimpleUploadedFile(
+            "existing-brief.docx",
+            _build_docx_bytes(),
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        response = self.client.post(
+            reverse("import_document"),
+            {
+                "title": "Existing I-751 Brief",
+                "document_type": self.document_type.slug,
+                "file": upload,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        document = Document.objects.get(title="Existing I-751 Brief")
+        self.assertTrue(bool(document.source_docx))
+        self.assertEqual(document.document_type, self.document_type)
+        self.assertEqual(document.versions.count(), 1)
+        self.assertEqual(document.versions.first().label, "Imported from Word")
+        self.assertEqual(document.content.get("type"), "doc")
+
+    def test_docx_export_uses_source_docx_template_when_present(self):
+        upload = SimpleUploadedFile(
+            "existing-brief.docx",
+            _build_docx_bytes(margin_inches=1.5),
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        document = Document.objects.create(
+            title="Imported Export Template",
+            document_type=self.document_type,
+            content={
+                "type": "doc",
+                "content": [
+                    {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Updated Heading"}]},
+                    {"type": "paragraph", "content": [{"type": "text", "text": "Updated body paragraph."}]},
+                ],
+            },
+            source_docx=upload,
+            created_by=self.user,
+        )
+
+        response = self.client.get(reverse("export_docx", kwargs={"doc_id": document.id}))
+
+        self.assertEqual(response.status_code, 200)
+        exported = DocxDocument(BytesIO(response.content))
+        self.assertAlmostEqual(exported.sections[0].left_margin.inches, 1.5, places=2)
+        self.assertEqual(exported.paragraphs[0].text, "Updated Heading")
 
 
 class CoverLetterExportTests(TestCase):

@@ -50,6 +50,20 @@ def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
     return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
 
 
+def tiptap_to_docx_with_template(
+    tiptap_json,
+    title="Document",
+    export_format="court_brief",
+    template_path="",
+):
+    return _tiptap_to_docx_generic(
+        tiptap_json,
+        title=title,
+        export_format=export_format,
+        template_path=template_path,
+    )
+
+
 def tiptap_to_docx_with_style_anchor(
     tiptap_json,
     title="Document",
@@ -65,50 +79,54 @@ def tiptap_to_docx_with_style_anchor(
     return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
 
 
-def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_brief"):
+def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_brief", template_path=""):
     """Convert Tiptap JSON content to a .docx file buffer."""
-    doc = DocxDocument()
+    doc = DocxDocument(template_path) if template_path else DocxDocument()
     preset = FORMAT_PRESETS.get(export_format, FORMAT_PRESETS["court_brief"])
+    preserve_template_styles = bool(template_path)
 
-    # Set margins
-    for section in doc.sections:
-        section.top_margin = Inches(preset["margin_inches"])
-        section.bottom_margin = Inches(preset["margin_inches"])
-        section.left_margin = Inches(preset["margin_inches"])
-        section.right_margin = Inches(preset["margin_inches"])
+    if template_path:
+        _clear_document_body(doc)
+    else:
+        # Set margins
+        for section in doc.sections:
+            section.top_margin = Inches(preset["margin_inches"])
+            section.bottom_margin = Inches(preset["margin_inches"])
+            section.left_margin = Inches(preset["margin_inches"])
+            section.right_margin = Inches(preset["margin_inches"])
 
-    # Configure default style
-    style = doc.styles["Normal"]
-    font = style.font
-    font.name = preset["font_name"]
-    font.size = Pt(preset["font_size"])
-    pf = style.paragraph_format
-    pf.line_spacing_rule = preset["line_spacing"]
-    pf.space_after = Pt(0)
-    pf.space_before = Pt(0)
+        # Configure default style
+        style = doc.styles["Normal"]
+        font = style.font
+        font.name = preset["font_name"]
+        font.size = Pt(preset["font_size"])
+        pf = style.paragraph_format
+        pf.line_spacing_rule = preset["line_spacing"]
+        pf.space_after = Pt(0)
+        pf.space_before = Pt(0)
 
-    # Configure heading styles
-    for level in range(1, 4):
-        style_name = f"Heading {level}"
-        if style_name in doc.styles:
-            hs = doc.styles[style_name]
-            hs.font.name = preset["font_name"]
-            hs.font.bold = True
-            if level == 1:
-                hs.font.size = Pt(14)
-            elif level == 2:
-                hs.font.size = Pt(13)
-            else:
-                hs.font.size = Pt(12)
-            hs.paragraph_format.space_before = Pt(12)
-            hs.paragraph_format.space_after = Pt(6)
+        # Configure heading styles
+        for level in range(1, 4):
+            style_name = f"Heading {level}"
+            if style_name in doc.styles:
+                hs = doc.styles[style_name]
+                hs.font.name = preset["font_name"]
+                hs.font.bold = True
+                if level == 1:
+                    hs.font.size = Pt(14)
+                elif level == 2:
+                    hs.font.size = Pt(13)
+                else:
+                    hs.font.size = Pt(12)
+                hs.paragraph_format.space_before = Pt(12)
+                hs.paragraph_format.space_after = Pt(6)
 
     content = tiptap_json.get("content", []) if isinstance(tiptap_json, dict) else []
     para_counter = [0]  # mutable counter for numbered paragraphs
     footnotes = []
 
     for node in content:
-        _process_node(doc, node, preset, para_counter, footnotes)
+        _process_node(doc, node, preset, para_counter, footnotes, preserve_template_styles=preserve_template_styles)
 
     if footnotes:
         doc.add_page_break()
@@ -597,7 +615,7 @@ def _process_cover_letter_node(doc, node, samples, state):
         return
 
 
-def _process_node(doc, node, preset, para_counter, footnotes):
+def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_template_styles=False):
     """Process a single Tiptap node into docx elements."""
     node_type = node.get("type", "")
 
@@ -640,11 +658,19 @@ def _process_node(doc, node, preset, para_counter, footnotes):
 
     elif node_type == "bulletList":
         for item in node.get("content", []):
-            _process_list_item(doc, item, preset, footnotes, bullet=True)
+            _process_list_item(doc, item, preset, footnotes, bullet=True, preserve_template_styles=preserve_template_styles)
 
     elif node_type == "orderedList":
         for i, item in enumerate(node.get("content", []), 1):
-            _process_list_item(doc, item, preset, footnotes, bullet=False, number=i)
+            _process_list_item(
+                doc,
+                item,
+                preset,
+                footnotes,
+                bullet=False,
+                number=i,
+                preserve_template_styles=preserve_template_styles,
+            )
 
     elif node_type == "blockquote":
         for child in node.get("content", []):
@@ -668,13 +694,13 @@ def _process_node(doc, node, preset, para_counter, footnotes):
         p.add_run().add_break(WD_BREAK.PAGE)
 
     elif node_type == "table":
-        _process_table(doc, node, preset, footnotes)
+        _process_table(doc, node, preset, footnotes, preserve_template_styles=preserve_template_styles)
 
     elif node_type == "hardBreak":
         pass  # Handled within text extraction
 
 
-def _process_list_item(doc, item, preset, footnotes, bullet=True, number=None):
+def _process_list_item(doc, item, preset, footnotes, bullet=True, number=None, preserve_template_styles=False):
     """Process a list item node."""
     for child in item.get("content", []):
         if child.get("type") == "paragraph":
@@ -684,11 +710,12 @@ def _process_list_item(doc, item, preset, footnotes, bullet=True, number=None):
             else:
                 p = doc.add_paragraph(style="List Number")
             _apply_text_parts(p, inline_parts, footnotes)
-            p.style.font.name = preset["font_name"]
-            p.style.font.size = Pt(preset["font_size"])
+            if not preserve_template_styles:
+                p.style.font.name = preset["font_name"]
+                p.style.font.size = Pt(preset["font_size"])
 
 
-def _process_table(doc, node, preset, footnotes):
+def _process_table(doc, node, preset, footnotes, preserve_template_styles=False):
     """Process a table node."""
     rows_data = node.get("content", [])
     if not rows_data:
@@ -701,7 +728,8 @@ def _process_table(doc, node, preset, footnotes):
     ) if rows_data else 1
 
     table = doc.add_table(rows=num_rows, cols=num_cols)
-    table.style = "Table Grid"
+    if not preserve_template_styles:
+        table.style = "Table Grid"
 
     for r_idx, row_node in enumerate(rows_data):
         cells = row_node.get("content", [])

@@ -14,6 +14,51 @@
         <p class="text-gray-500 text-sm mt-1">Choose a template to get started</p>
     </div>
 
+    {% if messages %}
+    <div class="space-y-2 mb-6">
+        {% for message in messages %}
+        <div class="rounded-lg border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% else %}border-green-200 bg-green-50 text-green-700{% endif %}">
+            {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="mb-10 rounded-2xl border border-gold/30 bg-white p-6 shadow-sm">
+        <div class="flex items-start justify-between gap-6 flex-col md:flex-row">
+            <div class="max-w-xl">
+                <h2 class="text-lg font-semibold text-navy">Import Existing Word Draft</h2>
+                <p class="mt-2 text-sm text-gray-600">
+                    Upload a mostly finished <code class="bg-gray-100 px-1.5 py-0.5 rounded">.docx</code> cover letter or brief,
+                    turn it into an editable draft, and keep the original Word file as the export template so you can keep refining it with the research agent.
+                </p>
+            </div>
+            <form method="post" action="{% url 'import_document' %}" enctype="multipart/form-data" class="w-full md:max-w-md space-y-3">
+                {% csrf_token %}
+                <div>
+                    <label for="import-file" class="block text-xs font-semibold uppercase tracking-wide text-gray-500">Word File</label>
+                    <input id="import-file" type="file" name="file" accept=".docx" required class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
+                </div>
+                <div>
+                    <label for="import-title" class="block text-xs font-semibold uppercase tracking-wide text-gray-500">Title</label>
+                    <input id="import-title" type="text" name="title" maxlength="500" placeholder="Optional. Defaults to the file name." class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
+                </div>
+                <div>
+                    <label for="import-document-type" class="block text-xs font-semibold uppercase tracking-wide text-gray-500">Document Type</label>
+                    <select id="import-document-type" name="document_type" required class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
+                        <option value="">Choose a document type</option>
+                        {% for dt in document_types %}
+                        <option value="{{ dt.slug }}">{{ dt.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit" class="inline-flex items-center justify-center rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-navy hover:opacity-90 transition-opacity">
+                    Import into Editor
+                </button>
+            </form>
+        </div>
+    </div>
+
     {% for category_name, types in categories.items %}
     <div class="mb-8">
         <h2 class="text-lg font-semibold text-gray-700 mb-3">{{ category_name }}s</h2>
