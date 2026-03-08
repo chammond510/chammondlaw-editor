@@ -1213,6 +1213,14 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _strip_markdown_fences(text: str) -> str:
+    raw = (text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
+
+
 def _coerce_int(value: Any):
     try:
         if value in ("", None):
@@ -1254,6 +1262,25 @@ _EDIT_OPERATIONS = {
     "append_to_document",
     "delete_selection",
 }
+
+_EDIT_FALLBACK_SECTION_LABELS = {
+    "edit summary": "edit_summary",
+    "summary": "edit_summary",
+    "why": "rationale",
+    "rationale": "rationale",
+    "target text": "target_text",
+    "target": "target_text",
+    "current text": "target_text",
+    "proposed text": "proposed_text",
+    "drafted result": "proposed_text",
+    "replacement text": "proposed_text",
+    "revised text": "proposed_text",
+    "draft": "proposed_text",
+    "notes": "notes",
+}
+_EDIT_FALLBACK_SECTION_RE = re.compile(
+    r"(?im)^(edit summary|summary|why|rationale|target text|target|current text|proposed text|drafted result|replacement text|revised text|draft|notes)\s*:\s*"
+)
 
 
 def _structured_result_failure_message(mode: str) -> str:
@@ -1302,6 +1329,60 @@ def _normalize_edit_result(payload: Any, *, request_payload: dict[str, Any]) -> 
         "selection_from": _coerce_int(request_payload.get("selection_from")),
         "selection_to": _coerce_int(request_payload.get("selection_to")),
     }
+
+
+def _infer_edit_operation_from_request(*, request_payload: dict[str, Any], target_text: str) -> str:
+    selected_text = str(request_payload.get("selected_text") or "").strip()
+    if selected_text:
+        return "replace_selection"
+
+    instruction = " ".join(str(request_payload.get("instruction") or "").lower().split())
+    if not target_text:
+        return "append_to_document"
+    if re.search(r"\b(delete|remove|strike)\b", instruction):
+        return "delete_selection"
+    if re.search(r"\bbefore\b", instruction):
+        return "insert_before_selection"
+    if re.search(r"\b(after|under|below|following)\b", instruction):
+        return "insert_after_selection"
+    if re.search(r"\b(add|insert|draft)\b", instruction):
+        return "insert_after_selection"
+    return "replace_selection"
+
+
+def _fallback_edit_result_from_text(raw_answer: str, *, request_payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned = _strip_markdown_fences(raw_answer)
+    if not cleaned:
+        return {}
+
+    sections: dict[str, str] = {}
+    matches = list(_EDIT_FALLBACK_SECTION_RE.finditer(cleaned))
+    for index, match in enumerate(matches):
+        label = _EDIT_FALLBACK_SECTION_LABELS.get(match.group(1).strip().lower())
+        if not label:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned)
+        value = cleaned[start:end].strip()
+        if value and label not in sections:
+            sections[label] = value
+
+    target_text = str(sections.get("target_text") or request_payload.get("selected_text") or "").strip()
+    proposed_text = str(sections.get("proposed_text") or "").strip() or cleaned
+    normalized = _normalize_edit_result(
+        {
+            "edit_summary": sections.get("edit_summary") or "",
+            "rationale": sections.get("rationale") or "",
+            "operation": _infer_edit_operation_from_request(request_payload=request_payload, target_text=target_text),
+            "target_text": target_text,
+            "proposed_text": proposed_text,
+            "notes": sections.get("notes") or "",
+        },
+        request_payload=request_payload,
+    )
+    if normalized.get("operation") != "delete_selection" and not normalized.get("proposed_text"):
+        return {}
+    return normalized
 
 
 class DocumentResearchAgent:
@@ -2487,23 +2568,55 @@ class DocumentResearchAgent:
     def _queue_json_repair(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
         if metadata.get("json_repair_attempted"):
+            if run.mode == "edit":
+                fallback = _fallback_edit_result_from_text(
+                    _extract_output_text(response),
+                    request_payload=run.request_payload or {},
+                )
+                if fallback:
+                    return self._mark_run_completed(
+                        run,
+                        result_payload=self._build_edit_result_payload(
+                            run=run,
+                            response=response,
+                            normalized=fallback,
+                            answer=_extract_output_text(response),
+                        ),
+                        response=response,
+                    )
             return self._mark_run_failed(run, _structured_result_failure_message(run.mode))
 
         metadata["json_repair_attempted"] = True
         metadata["finalization_source"] = "json_repair"
         run.metadata = metadata
         self._refresh_run_evidence_pack(run=run)
+        if run.mode == "edit":
+            repair_instructions = (
+                "You are repairing a structured edit proposal. "
+                "Return valid JSON only. Do not perform more research. "
+                "Use this exact shape: "
+                '{"edit_summary":"...","rationale":"...","operation":"replace_selection | insert_before_selection | insert_after_selection | append_to_document | delete_selection","target_text":"...","proposed_text":"...","notes":"..."}'
+            )
+            repair_input = (
+                "Reformat your previous answer as valid JSON only.\n\n"
+                "If the previous answer already contains drafted language, put that language in proposed_text.\n"
+                "If the request targeted an existing paragraph or heading, keep that exact existing document text in target_text.\n"
+                "Do not include markdown fences or any prose outside the JSON object."
+            )
+        else:
+            repair_instructions = (
+                "You are repairing a structured-output response. "
+                "Return valid JSON only, matching the previously requested schema. "
+                "Do not perform more research."
+            )
+            repair_input = (
+                "Reformat your previous answer as valid JSON only. "
+                "Do not include markdown fences or any prose outside the JSON object."
+            )
         try:
             repair_response = self._create_background_response(
-                instructions=(
-                    "You are repairing a structured-output response. "
-                    "Return valid JSON only, matching the previously requested schema. "
-                    "Do not perform more research."
-                ),
-                input_payload=(
-                    "Reformat your previous answer as valid JSON only. "
-                    "Do not include markdown fences or any prose outside the JSON object."
-                ),
+                instructions=repair_instructions,
+                input_payload=repair_input,
                 tools=[],
                 previous_response_id=(getattr(response, "id", "") or "").strip() or None,
                 tool_choice="none",
@@ -2591,11 +2704,29 @@ class DocumentResearchAgent:
             return self._mark_run_failed(run, _structured_result_failure_message(run.mode))
         if normalized["operation"] != "delete_selection" and not normalized["proposed_text"]:
             return self._queue_json_repair(run=run, response=response)
+        return self._mark_run_completed(
+            run,
+            result_payload=self._build_edit_result_payload(
+                run=run,
+                response=response,
+                normalized=normalized,
+                answer=answer,
+            ),
+            response=response,
+        )
 
-        result_payload = {
+    def _build_edit_result_payload(
+        self,
+        *,
+        run: DocumentResearchRun,
+        response: Any,
+        normalized: dict[str, Any],
+        answer: str,
+    ) -> dict[str, Any]:
+        return {
             **normalized,
-            "selection_required": bool(normalized["selected_text"]) and normalized["operation"] != "append_to_document",
-            "target_review_required": normalized["operation"] != "append_to_document",
+            "selection_required": bool(normalized.get("selected_text")) and normalized.get("operation") != "append_to_document",
+            "target_review_required": normalized.get("operation") != "append_to_document",
             "response_id": (getattr(response, "id", "") or "").strip(),
             "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
@@ -2606,7 +2737,6 @@ class DocumentResearchAgent:
                 "reasoning_effort": (run.metadata or {}).get("reasoning_effort", AGENT_REASONING_EFFORT),
             },
         }
-        return self._mark_run_completed(run, result_payload=result_payload, response=response)
 
     def _force_final_response(
         self,

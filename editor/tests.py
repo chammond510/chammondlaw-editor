@@ -1052,6 +1052,70 @@ class AgentServiceTests(TestCase):
         self.assertEqual(normalized["operation"], "replace_selection")
         self.assertEqual(normalized["target_text"], "Original introduction paragraph.")
 
+    @patch("editor.agent_service._new_openai_client")
+    def test_queue_json_repair_salvages_plain_text_edit_response(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="repairing_json",
+            request_payload={
+                "instruction": "Strengthen this paragraph.",
+                "selected_text": "Original paragraph text.",
+            },
+            metadata=agent._initial_run_metadata(mode="edit", previous_response_id=""),
+        )
+        run.metadata["json_repair_attempted"] = True
+        run.save(update_fields=["metadata", "updated_at"])
+
+        response = SimpleNamespace(
+            id="resp_edit_plain",
+            output_text="Proposed text:\nRevised paragraph text.",
+        )
+
+        updated = agent._queue_json_repair(run=run, response=response)
+
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.result_payload["operation"], "replace_selection")
+        self.assertEqual(updated.result_payload["proposed_text"], "Revised paragraph text.")
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_queue_json_repair_salvages_structural_edit_from_plain_text_response(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="repairing_json",
+            request_payload={
+                "instruction": "Add a paragraph before III. CONCLUSION.",
+                "selected_text": "",
+            },
+            metadata=agent._initial_run_metadata(mode="edit", previous_response_id=""),
+        )
+        run.metadata["json_repair_attempted"] = True
+        run.save(update_fields=["metadata", "updated_at"])
+
+        response = SimpleNamespace(
+            id="resp_edit_structural",
+            output_text="Target:\nIII. CONCLUSION\n\nProposed text:\nFor these reasons, the petition should be granted.",
+        )
+
+        updated = agent._queue_json_repair(run=run, response=response)
+
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.result_payload["operation"], "insert_before_selection")
+        self.assertEqual(updated.result_payload["target_text"], "III. CONCLUSION")
+
     def test_normalize_edit_result_coerces_append_to_replace_when_selection_exists(self):
         normalized = _normalize_edit_result(
             {
