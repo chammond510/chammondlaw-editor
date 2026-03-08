@@ -363,6 +363,7 @@ let versions = [];
 let versionFilterText = '';
 let isNormalizingFootnotes = false;
 let lastSelectedResearchText = '';
+let lastEditSelection = null;
 let slashState = {
   open: false,
   items: [],
@@ -487,13 +488,11 @@ editor.view.dom.addEventListener('keydown', (e) => {
 });
 
 editor.on('selectionUpdate', () => {
-  const selected = editor.state.doc.textBetween(
-    editor.state.selection.from,
-    editor.state.selection.to,
-    ' '
-  ).trim();
-  if (selected) {
-    lastSelectedResearchText = selected;
+  const selection = getLiveSelectionSnapshot();
+  if (selection.text) {
+    rememberEditSelection(selection);
+  } else if (editor.isFocused) {
+    clearRememberedEditSelection();
   }
   updateToolbar();
   maybeOpenSlashMenu();
@@ -739,6 +738,36 @@ function getLiveSelectionSnapshot() {
     to,
     text: editor.state.doc.textBetween(from, to, ' ').trim(),
   };
+}
+
+function rememberEditSelection(selection) {
+  if (!selection?.text) return;
+  lastSelectedResearchText = selection.text;
+  lastEditSelection = {
+    from: selection.from,
+    to: selection.to,
+    text: selection.text,
+  };
+}
+
+function clearRememberedEditSelection() {
+  lastEditSelection = null;
+}
+
+function getRememberedEditSelection() {
+  if (!lastEditSelection?.text) {
+    return { from: null, to: null, text: '' };
+  }
+  return { ...lastEditSelection };
+}
+
+function getPreferredEditSelectionSnapshot() {
+  const liveSelection = getLiveSelectionSnapshot();
+  if (liveSelection.text) {
+    rememberEditSelection(liveSelection);
+    return liveSelection;
+  }
+  return getRememberedEditSelection();
 }
 
 function insertCitation(item) {
@@ -1335,12 +1364,12 @@ async function resetAgentSession() {
 
 function refreshResearchSelectionDisplays() {
   const selection = getCurrentResearchSelection();
-  const liveSelection = getLiveSelectionSnapshot().text;
+  const editSelection = getPreferredEditSelectionSnapshot().text;
   document.getElementById('suggest-selection-preview').textContent = selection || 'Select text in the editor to focus the suggestion.';
   document.getElementById('agent-chat-selection-hint').textContent = selection
     ? `Including current selection (${Math.min(selection.length, 220)} chars) when you send.`
     : 'Current selection will be included when available.';
-  document.getElementById('edit-selection-preview').textContent = liveSelection || 'Select text in the editor to revise it, or leave nothing selected to draft new language.';
+  document.getElementById('edit-selection-preview').textContent = editSelection || 'Select text in the editor to revise it, or leave nothing selected to draft new language.';
 }
 
 function authorityBadges(item) {
@@ -1496,9 +1525,9 @@ function resolveEditTargetRange(result) {
   }
 
   const expected = normalizeSelectionText(result.selected_text || result.target_text);
-  const liveSelection = getLiveSelectionSnapshot();
-  if (liveSelection.text && (!expected || normalizeSelectionText(liveSelection.text) === expected)) {
-    return { from: liveSelection.from, to: liveSelection.to };
+  const preferredSelection = getPreferredEditSelectionSnapshot();
+  if (preferredSelection.text && (!expected || normalizeSelectionText(preferredSelection.text) === expected)) {
+    return { from: preferredSelection.from, to: preferredSelection.to };
   }
 
   const from = Number.isInteger(result.selection_from) ? result.selection_from : null;
@@ -1744,7 +1773,7 @@ async function runAgentEdit() {
     return;
   }
 
-  const selection = getLiveSelectionSnapshot();
+  const selection = getPreferredEditSelectionSnapshot();
   renderEditPending('Reviewing the draft and drafting the proposed edit...');
 
   try {
