@@ -1369,7 +1369,7 @@ function refreshResearchSelectionDisplays() {
   document.getElementById('agent-chat-selection-hint').textContent = selection
     ? `Including current selection (${Math.min(selection.length, 220)} chars) when you send.`
     : 'Current selection will be included when available.';
-  document.getElementById('edit-selection-preview').textContent = editSelection || 'Select text in the editor to revise it, or leave nothing selected to draft new language.';
+  document.getElementById('edit-selection-preview').textContent = editSelection || 'Select text in the editor to revise it, or leave nothing selected and tell the agent where in the document to place the edit.';
 }
 
 function authorityBadges(item) {
@@ -1479,10 +1479,12 @@ function normalizeSelectionText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function operationLabel(operation) {
-  if (operation === 'replace_selection') return 'Replace selection';
-  if (operation === 'insert_after_selection') return 'Insert after selection';
-  if (operation === 'delete_selection') return 'Delete selection';
+function operationLabel(operation, result = null) {
+  const selectionWord = result?.selected_text ? 'selection' : 'target';
+  if (operation === 'replace_selection') return `Replace ${selectionWord}`;
+  if (operation === 'insert_before_selection') return `Insert before ${selectionWord}`;
+  if (operation === 'insert_after_selection') return `Insert after ${selectionWord}`;
+  if (operation === 'delete_selection') return `Delete ${selectionWord}`;
   return 'Append to document';
 }
 
@@ -1527,7 +1529,13 @@ function resolveEditTargetRange(result) {
   const expected = normalizeSelectionText(result.selected_text || result.target_text);
   const preferredSelection = getPreferredEditSelectionSnapshot();
   if (preferredSelection.text && (!expected || normalizeSelectionText(preferredSelection.text) === expected)) {
-    return { from: preferredSelection.from, to: preferredSelection.to };
+    return {
+      from: preferredSelection.from,
+      to: preferredSelection.to,
+      before: preferredSelection.from,
+      after: preferredSelection.to,
+      isBlock: false,
+    };
   }
 
   const from = Number.isInteger(result.selection_from) ? result.selection_from : null;
@@ -1536,7 +1544,13 @@ function resolveEditTargetRange(result) {
     try {
       const textAtRange = editor.state.doc.textBetween(from, to, ' ').trim();
       if (!expected || normalizeSelectionText(textAtRange) === expected) {
-        return { from, to };
+        return {
+          from,
+          to,
+          before: from,
+          after: to,
+          isBlock: false,
+        };
       }
     } catch {
       return null;
@@ -1550,18 +1564,28 @@ function resolveEditTargetRange(result) {
       if (matchedRange || !node.isTextblock) return !matchedRange;
       const blockText = String(node.textContent || '');
       if (!blockText) return true;
+      const normalizedBlock = normalizeSelectionText(blockText);
+      if (
+        blockText.trim() === exactTarget ||
+        (expected && normalizedBlock === expected)
+      ) {
+        matchedRange = {
+          from: pos,
+          to: pos + node.nodeSize,
+          before: pos,
+          after: pos + node.nodeSize,
+          isBlock: true,
+        };
+        return false;
+      }
       const exactIndex = blockText.indexOf(exactTarget);
       if (exactIndex !== -1) {
         matchedRange = {
           from: pos + 1 + exactIndex,
           to: pos + 1 + exactIndex + exactTarget.length,
-        };
-        return false;
-      }
-      if (expected && normalizeSelectionText(blockText) === expected) {
-        matchedRange = {
-          from: pos + 1,
-          to: pos + 1 + node.content.size,
+          before: pos + 1 + exactIndex,
+          after: pos + 1 + exactIndex + exactTarget.length,
+          isBlock: false,
         };
         return false;
       }
@@ -1589,10 +1613,12 @@ function applyEditOperationLocally(result) {
       }
       if (operation === 'delete_selection') {
         editor.chain().focus().deleteRange(range).run();
+      } else if (operation === 'insert_before_selection') {
+        editor.chain().focus().insertContentAt(range.before, tiptapNodesFromPlainText(result.proposed_text || '')).run();
       } else if (operation === 'replace_selection') {
-        editor.chain().focus().insertContentAt(range, tiptapNodesFromPlainText(result.proposed_text || '')).run();
+        editor.chain().focus().insertContentAt({ from: range.from, to: range.to }, tiptapNodesFromPlainText(result.proposed_text || '')).run();
       } else if (operation === 'insert_after_selection') {
-        editor.chain().focus().insertContentAt(range.to, tiptapNodesFromPlainText(result.proposed_text || '')).run();
+        editor.chain().focus().insertContentAt(range.after, tiptapNodesFromPlainText(result.proposed_text || '')).run();
       } else {
         throw new Error('Unsupported edit operation returned by the agent.');
       }
@@ -1668,6 +1694,11 @@ function renderEditResponse(result) {
     ? '[The agent proposes deleting the targeted text.]'
     : (result.proposed_text || '');
   const sourceSummary = toolSourceSummary(result.tool_calls || []);
+  const operation = effectiveEditOperation(result);
+  const targetLabel = result.selected_text ? 'Current selection' : (targetText ? 'Matched document text' : 'Document end');
+  const reviewNote = result.applied_at
+    ? 'This reviewed edit has already been applied to the draft.'
+    : 'Review this working-copy change below. Nothing is written into the draft until you click Apply to Draft.';
   const appliedMarkup = result.applied_at
     ? `<div class="text-[11px] text-green-700">Applied at ${escapeHtml(new Date(result.applied_at).toLocaleString())}</div>`
     : '';
@@ -1677,20 +1708,26 @@ function renderEditResponse(result) {
       <div class="flex items-start justify-between gap-3">
         <div>
           <div class="text-sm font-semibold text-navy">${escapeHtml(result.edit_summary || 'Proposed edit')}</div>
-          <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(operationLabel(effectiveEditOperation(result)))}</div>
+          <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(operationLabel(operation, result))}</div>
           ${appliedMarkup}
         </div>
-        <button id="apply-agent-edit" class="px-3 py-1 text-xs rounded ${result.applied_at ? 'border text-gray-400 cursor-not-allowed' : 'bg-gold text-navy'}" ${result.applied_at ? 'disabled' : ''}>${result.applied_at ? 'Applied' : 'Apply Edit'}</button>
+        <button id="apply-agent-edit" class="px-3 py-1 text-xs rounded ${result.applied_at ? 'border text-gray-400 cursor-not-allowed' : 'bg-gold text-navy'}" ${result.applied_at ? 'disabled' : ''}>${result.applied_at ? 'Applied' : 'Apply to Draft'}</button>
       </div>
       ${result.rationale ? `<div class="text-xs text-gray-700"><span class="font-semibold">Why:</span> ${escapeHtml(result.rationale)}</div>` : ''}
-      ${targetText ? `<div class="text-xs text-gray-700"><span class="font-semibold">Target:</span><div class="mt-1 whitespace-pre-wrap rounded bg-gray-50 border p-2">${escapeHtml(targetText)}</div></div>` : ''}
-      <div class="text-xs text-gray-700">
-        <span class="font-semibold">Proposed text:</span>
-        <pre class="mt-1 whitespace-pre-wrap rounded bg-gray-50 border p-2 text-[11px]">${escapeHtml(proposedText)}</pre>
+      <div class="rounded border bg-gray-50 p-2 text-[11px] text-gray-600">${escapeHtml(reviewNote)}</div>
+      <div class="grid gap-3 md:grid-cols-2">
+        <div class="text-xs text-gray-700">
+          <span class="font-semibold">${escapeHtml(targetLabel)}:</span>
+          <pre class="mt-1 whitespace-pre-wrap rounded bg-white border p-2 text-[11px]">${escapeHtml(targetText || '[No existing target text. The change will be appended at the end of the draft.]')}</pre>
+        </div>
+        <div class="text-xs text-gray-700">
+          <span class="font-semibold">Drafted result:</span>
+          <pre class="mt-1 whitespace-pre-wrap rounded bg-white border p-2 text-[11px]">${escapeHtml(proposedText)}</pre>
+        </div>
       </div>
       ${result.notes ? `<div class="text-xs text-gray-600">${escapeHtml(result.notes)}</div>` : ''}
       ${sourceSummary ? `<div class="text-[11px] text-gray-500">${escapeHtml(sourceSummary)}</div>` : ''}
-      ${result.selection_required ? '<div class="text-[11px] text-gray-500">If the document changed since the proposal was drafted, reselect the target passage before applying.</div>' : ''}
+      ${(result.selection_required || result.target_review_required) ? '<div class="text-[11px] text-gray-500">If the draft changed since this proposal was generated, confirm the target text still matches the place you want to edit before applying.</div>' : ''}
     </div>
   `;
 

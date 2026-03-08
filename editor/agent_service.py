@@ -216,16 +216,17 @@ Hard rules:
 4. Propose one concrete edit only. Do not rewrite the whole document unless the user explicitly asks for that and the operation is append_to_document.
 5. The final answer must be valid JSON only. No markdown fences and no prose outside the JSON object.
 6. proposed_text must be plain drafting text, preserving paragraph breaks but not markdown formatting.
-7. If selected text was provided, use it as the target for replace_selection, insert_after_selection, or delete_selection.
-8. If no selected text was provided, do not use replace_selection, insert_after_selection, or delete_selection. Use append_to_document instead.
-9. Honor the Turn requirements JSON block in the input. If exact quotes are required, verify them before drafting the edit.
-10. Once you have enough verified support to propose the edit, stop calling tools and return the JSON object.
+7. If selected text was provided, use it as the target for replace_selection, insert_before_selection, insert_after_selection, or delete_selection.
+8. If no selected text was provided but the user identified a location in the draft, target an exact existing heading or paragraph from the current document in target_text and use replace_selection, insert_before_selection, insert_after_selection, or delete_selection as appropriate.
+9. Use append_to_document only when the user did not identify a reliable place in the existing draft.
+10. Honor the Turn requirements JSON block in the input. If exact quotes are required, verify them before drafting the edit.
+11. Once you have enough verified support to propose the edit, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
 {
   "edit_summary": "short summary of the proposed change",
   "rationale": "why this change improves the draft",
-  "operation": "replace_selection | insert_after_selection | append_to_document | delete_selection",
+  "operation": "replace_selection | insert_before_selection | insert_after_selection | append_to_document | delete_selection",
   "target_text": "the text being revised or removed, or an empty string for append_to_document",
   "proposed_text": "the exact text to insert; may be empty only for delete_selection",
   "notes": "optional implementation note or drafting caveat"
@@ -1248,6 +1249,7 @@ def _normalize_authorities(items: Any) -> list[dict[str, Any]]:
 
 _EDIT_OPERATIONS = {
     "replace_selection",
+    "insert_before_selection",
     "insert_after_selection",
     "append_to_document",
     "delete_selection",
@@ -1260,13 +1262,13 @@ def _structured_result_failure_message(mode: str) -> str:
     return "The agent did not return valid structured suggestion data."
 
 
-def _normalize_edit_operation(value: Any, *, has_selected_text: bool) -> str:
+def _normalize_edit_operation(value: Any, *, has_selected_text: bool, has_target_text: bool) -> str:
     operation = str(value or "").strip().lower()
     if operation not in _EDIT_OPERATIONS:
-        operation = "replace_selection" if has_selected_text else "append_to_document"
+        operation = "replace_selection" if (has_selected_text or has_target_text) else "append_to_document"
     if has_selected_text and operation == "append_to_document":
         operation = "replace_selection"
-    if not has_selected_text and operation != "append_to_document":
+    if not has_selected_text and not has_target_text and operation != "append_to_document":
         operation = "append_to_document"
     return operation
 
@@ -1277,12 +1279,18 @@ def _normalize_edit_result(payload: Any, *, request_payload: dict[str, Any]) -> 
 
     selected_text = str(request_payload.get("selected_text") or "").strip()
     has_selected_text = bool(selected_text)
-    operation = _normalize_edit_operation(payload.get("operation"), has_selected_text=has_selected_text)
+    target_text = str(payload.get("target_text") or selected_text).strip()
+    has_target_text = bool(target_text)
+    operation = _normalize_edit_operation(
+        payload.get("operation"),
+        has_selected_text=has_selected_text,
+        has_target_text=has_target_text,
+    )
     return {
         "edit_summary": str(payload.get("edit_summary") or payload.get("summary") or "").strip(),
         "rationale": str(payload.get("rationale") or "").strip(),
         "operation": operation,
-        "target_text": str(payload.get("target_text") or selected_text).strip(),
+        "target_text": target_text,
         "proposed_text": str(
             payload.get("proposed_text")
             or payload.get("replacement_text")
@@ -2586,7 +2594,8 @@ class DocumentResearchAgent:
 
         result_payload = {
             **normalized,
-            "selection_required": normalized["operation"] != "append_to_document",
+            "selection_required": bool(normalized["selected_text"]) and normalized["operation"] != "append_to_document",
+            "target_review_required": normalized["operation"] != "append_to_document",
             "response_id": (getattr(response, "id", "") or "").strip(),
             "tool_calls": _public_tool_calls(run.tool_calls or []),
             "citations": run.citations or [],
@@ -2783,6 +2792,27 @@ class DocumentResearchAgent:
         )
         return "\n".join(lines).strip()
 
+    def _document_outline_block(self) -> str:
+        content = self.document.content.get("content", []) if isinstance(self.document.content, dict) else []
+        if not isinstance(content, list):
+            return ""
+
+        outline_lines = []
+        for node in content:
+            if not isinstance(node, dict) or node.get("type") != "heading":
+                continue
+            level = node.get("attrs", {}).get("level") or 1
+            text = extract_plain_text(node, max_chars=240).replace("\n", " ").strip()
+            if not text:
+                continue
+            outline_lines.append(f"- H{level}: {text}")
+            if len(outline_lines) >= 18:
+                break
+
+        if not outline_lines:
+            return ""
+        return "Document outline:\n" + "\n".join(outline_lines)
+
     def _chat_input(self, *, message: str, selected_text: str = "", transcript_messages: list[Any]) -> str:
         transcript = self._transcript_block(transcript_messages)
         blocks = []
@@ -2825,6 +2855,9 @@ class DocumentResearchAgent:
         blocks = [
             self._document_context_block(mode="edit", selected_text=selected_text),
         ]
+        outline = self._document_outline_block()
+        if outline:
+            blocks.append(outline)
         blocks.append(
             _turn_requirements_block(
                 _make_turn_requirements(
@@ -2838,11 +2871,11 @@ class DocumentResearchAgent:
         )
         if selected_text:
             blocks.append(
-                "Edit target:\nUse the selected text as the exact target for any replace, insert-after, or delete operation."
+                "Edit target:\nUse the selected text as the exact target for any replace, insert-before, insert-after, or delete operation."
             )
         else:
             blocks.append(
-                "Edit target:\nNo text is currently selected. If you draft new language, use append_to_document."
+                "Edit target:\nNo text is currently selected. If the user identified a place in the draft, anchor the edit to an exact existing heading or paragraph from the document. Use append_to_document only if there is no reliable in-document target."
             )
         blocks.append("User edit instruction:\n" + instruction.strip())
         return "\n\n".join(block for block in blocks if block).strip()

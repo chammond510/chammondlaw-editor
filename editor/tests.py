@@ -1026,7 +1026,7 @@ class AgentServiceTests(TestCase):
         self.assertIn("Conversation so far:", request["input_payload"])
         self.assertIn("First question", request["input_payload"])
 
-    def test_normalize_edit_result_falls_back_to_append_without_selected_text(self):
+    def test_normalize_edit_result_falls_back_to_append_without_selected_text_or_target(self):
         normalized = _normalize_edit_result(
             {
                 "edit_summary": "Add a conclusion",
@@ -1037,6 +1037,20 @@ class AgentServiceTests(TestCase):
         )
 
         self.assertEqual(normalized["operation"], "append_to_document")
+
+    def test_normalize_edit_result_keeps_targeted_replace_without_selected_text(self):
+        normalized = _normalize_edit_result(
+            {
+                "edit_summary": "Revise the introduction paragraph",
+                "operation": "replace_selection",
+                "target_text": "Original introduction paragraph.",
+                "proposed_text": "Updated introduction paragraph.",
+            },
+            request_payload={"selected_text": ""},
+        )
+
+        self.assertEqual(normalized["operation"], "replace_selection")
+        self.assertEqual(normalized["target_text"], "Original introduction paragraph.")
 
     def test_normalize_edit_result_coerces_append_to_replace_when_selection_exists(self):
         normalized = _normalize_edit_result(
