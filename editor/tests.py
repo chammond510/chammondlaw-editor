@@ -17,6 +17,8 @@ from .agent_service import (
     _extract_hosted_tool_calls,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
+    _quote_request_runtime_note,
+    _requested_full_text_sources,
 )
 from .models import (
     Document,
@@ -559,6 +561,21 @@ class AgentServiceTests(TestCase):
         self.assertIn("output_excerpt", tool_calls[0])
         self.assertIn("waiver filing basis", tool_calls[0]["output_excerpt"])
 
+    def test_requested_full_text_sources_detects_policy_and_case_quote_requests(self):
+        sources = _requested_full_text_sources(
+            "Find quotes from case law and quotes from the USCIS Policy Manual for this issue."
+        )
+
+        self.assertEqual(sources, {"case", "policy"})
+
+    def test_quote_request_runtime_note_guides_full_text_tools(self):
+        note = _quote_request_runtime_note(
+            "Find quotes from case law and quotes from the USCIS Policy Manual that I can use."
+        )
+
+        self.assertIn("search_references with source_code='uscis_pm' and then get_reference", note)
+        self.assertIn("get_document_text", note)
+
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
             _normalize_mcp_server_url("biaedge-mcp.onrender.com"),
@@ -811,6 +828,82 @@ class AgentServiceTests(TestCase):
             completed.result_payload["answer"],
             "Beginning of the answer. End of the answer.",
         )
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_advance_run_requests_full_text_before_finalizing_quote_answer(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="in_progress",
+            stage="waiting_openai",
+            response_id="resp_policy_search",
+            request_payload={
+                "message": "Find quotes from case law and quotes from the USCIS Policy Manual for this paragraph.",
+                "selected_text": "Selected paragraph text.",
+            },
+            metadata=agent._initial_run_metadata(mode="chat", previous_response_id=""),
+            tool_calls=[
+                {
+                    "source": "biaedge",
+                    "type": "mcp_call",
+                    "name": "search_references",
+                    "status": "completed",
+                    "arguments": {"query": "uscis policy manual change waiver basis", "source_code": "uscis_pm"},
+                }
+            ],
+        )
+
+        completed_response = SimpleNamespace(
+            id="resp_policy_search",
+            status="completed",
+            error=None,
+            output_text=(
+                "I do not have a verified direct quote from the USCIS Policy Manual in the materials gathered for this turn."
+            ),
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text=(
+                                "I do not have a verified direct quote from the USCIS Policy Manual in the materials gathered for this turn."
+                            ),
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            usage=None,
+        )
+        queued_response = SimpleNamespace(
+            id="resp_quote_verify",
+            status="queued",
+            error=None,
+            usage=None,
+            output=[],
+        )
+
+        agent.client.responses.retrieve = lambda *args, **kwargs: completed_response
+
+        with patch.object(agent, "_build_tools", return_value=[{"type": "mcp"}]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+                updated = agent.advance_run(run=run)
+
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.stage, "verifying_quotes")
+        self.assertEqual(updated.response_id, "resp_quote_verify")
+        self.assertTrue(updated.metadata.get("quote_source_verification_attempted"))
+        request = create_background.call_args.kwargs
+        self.assertEqual(request["tool_choice"], "auto")
+        self.assertEqual(request["previous_response_id"], "resp_policy_search")
+        self.assertIn("source_code='uscis_pm' and then get_reference", request["instructions"])
+        self.assertIn("USCIS Policy Manual", request["input_payload"])
 
 
 class CoverLetterExportTests(TestCase):

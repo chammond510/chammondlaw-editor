@@ -103,7 +103,9 @@ Research operating rules:
 8. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
 9. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 10. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-11. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
+11. If the attorney asks for direct quotes or exact source language, retrieve the actual source text before answering. For USCIS Policy Manual sections, use search_references with source_code='uscis_pm' and then get_reference. For statutes and regulations, use get_statute. For cases, use get_document_text.
+12. Do not say the text is unavailable unless you actually tried the relevant full-text tool in this turn.
+13. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
 - Be direct, practical, and collaborative.
@@ -125,7 +127,8 @@ Hard rules:
 7. Research efficiently. Start broad, then narrow to the best 2 to 5 authorities for this passage.
 8. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
 9. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-10. Once you have enough verified authority to support the selection, stop calling tools and return the JSON object.
+10. If the attorney asks for quoted language or an exact pinpoint from a policy manual, statute, regulation, or case, retrieve the actual full text before drafting the pinpoint.
+11. Once you have enough verified authority to support the selection, stop calling tools and return the JSON object.
 
 Return an object with this exact shape:
 {
@@ -550,6 +553,65 @@ def _join_text_fragments(fragments: list[str]) -> str:
         else:
             combined += " " + text
     return combined
+
+
+def _requested_full_text_sources(text: str) -> set[str]:
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return set()
+
+    quote_requested = bool(
+        re.search(r"\bquote(?:s|d)?\b", normalized)
+        or any(
+            phrase in normalized
+            for phrase in [
+                "exact language",
+                "verbatim",
+                "actual text",
+                "pull the text",
+                "pull text",
+                "quoted language",
+            ]
+        )
+    )
+    if not quote_requested:
+        return set()
+
+    sources: set[str] = set()
+    if any(phrase in normalized for phrase in ["policy manual", "uscis policy", "uscis-pm", "uscis pm"]):
+        sources.add("policy")
+    if (
+        re.search(r"\b(case law|cases|decisions?|holdings?)\b", normalized)
+        or "quote from case" in normalized
+        or "quotes from case" in normalized
+    ):
+        sources.add("case")
+    if re.search(r"\b(statutes?|regulations?|cfr|c\.f\.r\.|u\.s\.c\.|usc|ina)\b", normalized):
+        sources.add("statute")
+    return sources
+
+
+def _quote_request_runtime_note(text: str) -> str:
+    requested_sources = _requested_full_text_sources(text)
+    if not requested_sources:
+        return ""
+
+    instructions = []
+    if "policy" in requested_sources:
+        instructions.append(
+            "For USCIS Policy Manual text, use search_references with source_code='uscis_pm' and then get_reference before quoting."
+        )
+    if "statute" in requested_sources:
+        instructions.append("For statutes or regulations, use get_statute before quoting exact language.")
+    if "case" in requested_sources:
+        instructions.append("For case law, use get_document_text before quoting exact language.")
+
+    return (
+        "Runtime note:\n"
+        "The attorney asked for direct quotes or exact source language. "
+        + " ".join(instructions)
+        + " Do not say the text is unavailable unless you have tried the relevant full-text tool in this turn."
+    )
 
 
 def _extract_citations(response: Any) -> list[dict[str, Any]]:
@@ -1024,6 +1086,15 @@ class DocumentResearchAgent:
         if not answer:
             return self._queue_force_final_response(run=run, response=response)
 
+        if run.mode == "chat":
+            missing_sources = self._missing_full_text_sources_for_run(run=run)
+            if missing_sources and not bool((run.metadata or {}).get("quote_source_verification_attempted")):
+                return self._queue_quote_source_verification(
+                    run=run,
+                    response=response,
+                    missing_sources=missing_sources,
+                )
+
         if run.mode == "suggest":
             return self._finalize_suggest_run(run=run, response=response, answer=answer)
         return self._finalize_chat_run(run=run, response=response, answer=answer)
@@ -1207,6 +1278,7 @@ class DocumentResearchAgent:
             "used_previous_response_id": bool(previous_response_id),
             "forced_final_attempted": False,
             "json_repair_attempted": False,
+            "quote_source_verification_attempted": False,
             "continuation_attempts": 0,
             "answer_fragments": [],
             "usage_by_response_id": {},
@@ -1215,6 +1287,35 @@ class DocumentResearchAgent:
 
     def _prompt_cache_key(self, mode: str) -> str:
         return f"document-agent:{mode}:{self.document.id}"
+
+    def _request_text(self, *, request_payload: dict[str, Any]) -> str:
+        parts = [
+            str(request_payload.get("message") or "").strip(),
+            str(request_payload.get("focus_note") or "").strip(),
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _requested_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> set[str]:
+        return _requested_full_text_sources(self._request_text(request_payload=run.request_payload or {}))
+
+    def _missing_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> list[str]:
+        requested_sources = self._requested_full_text_sources_for_run(run=run)
+        if not requested_sources:
+            return []
+
+        tool_names = {
+            str(item.get("name") or "").strip()
+            for item in (run.tool_calls or [])
+            if isinstance(item, dict)
+        }
+        missing = []
+        if "policy" in requested_sources and "get_reference" not in tool_names:
+            missing.append("USCIS Policy Manual or other reference full text")
+        if "statute" in requested_sources and "get_statute" not in tool_names:
+            missing.append("statute or regulation full text")
+        if "case" in requested_sources and "get_document_text" not in tool_names:
+            missing.append("case-law full text")
+        return missing
 
     def _append_answer_fragment(self, *, run: DocumentResearchRun, response: Any) -> None:
         fragment = _extract_output_text(response)
@@ -1248,6 +1349,46 @@ class DocumentResearchAgent:
         if answer:
             fragments.append(answer)
         return _join_text_fragments(fragments)
+
+    def _queue_quote_source_verification(self, *, run: DocumentResearchRun, response: Any, missing_sources: list[str]) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if metadata.get("quote_source_verification_attempted"):
+            return self._finalize_chat_run(
+                run=run,
+                response=response,
+                answer=self._assembled_answer(run=run, response=response, answer=_extract_output_text(response)),
+            )
+
+        metadata["quote_source_verification_attempted"] = True
+        run.metadata = metadata
+        missing_text = "; ".join(missing_sources)
+        try:
+            follow_up = self._create_background_response(
+                instructions=(
+                    self._run_instructions(run)
+                    + "\n\nRuntime note:\n"
+                    + "The attorney requested direct quotes or exact source language. "
+                    + "Before answering, retrieve the missing full-text authorities and only then draft the answer. "
+                    + "For USCIS Policy Manual sections, use search_references with source_code='uscis_pm' and then get_reference. "
+                    + "For statutes or regulations, use get_statute. "
+                    + "For case law, use get_document_text. "
+                    + "Do not say the text is unavailable unless you actually tried the relevant full-text tool in this turn."
+                ),
+                input_payload=(
+                    "Before finalizing, retrieve the actual source text for these requested authority types: "
+                    f"{missing_text}. Then answer the attorney with verified quoted language if available."
+                ),
+                tools=self._build_tools(mode=run.mode, include_mcp=self._run_include_mcp(run)),
+                previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                tool_choice="auto",
+                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                mode=run.mode,
+            )
+        except AgentExecutionError as exc:
+            return self._mark_run_failed(run, str(exc))
+
+        run.previous_response_id = (getattr(response, "id", "") or "").strip()
+        return self._attach_started_response(run=run, response=follow_up, stage="verifying_quotes")
 
     def _run_instructions(self, run: DocumentResearchRun) -> str:
         if run.mode == "suggest":
@@ -1805,10 +1946,16 @@ class DocumentResearchAgent:
             parts.append(f"Document type slug: {document_slug}")
         if attorney_message:
             parts.extend(["", "Attorney request:", attorney_message[:4000]])
+            runtime_note = _quote_request_runtime_note(attorney_message)
+            if runtime_note:
+                parts.extend(["", runtime_note])
         if selected_text:
             parts.extend(["", "Selected text:", selected_text[:4000]])
         if focus_note:
             parts.extend(["", "User focus note:", focus_note[:2000]])
+            runtime_note = _quote_request_runtime_note(focus_note)
+            if runtime_note:
+                parts.extend(["", runtime_note])
         if tool_digest:
             parts.extend(["", "Verified research results from tools:", tool_digest])
 
@@ -1882,15 +2029,21 @@ class DocumentResearchAgent:
         if transcript:
             blocks.append("Conversation so far:\n" + transcript)
         blocks.append(self._document_context_block(mode="chat", selected_text=selected_text))
+        runtime_note = _quote_request_runtime_note(message)
+        if runtime_note:
+            blocks.append(runtime_note)
         blocks.append("User message:\n" + message.strip())
         return "\n\n".join(block for block in blocks if block).strip()
 
     def _suggest_input(self, *, selected_text: str, focus_note: str = "") -> str:
-        return (
-            self._document_context_block(mode="suggest", selected_text=selected_text, focus_note=focus_note)
-            + "\n\nTask:\n"
-            + "Suggest the best authorities for the selected passage in this document."
-        )
+        blocks = [
+            self._document_context_block(mode="suggest", selected_text=selected_text, focus_note=focus_note),
+        ]
+        runtime_note = _quote_request_runtime_note(focus_note)
+        if runtime_note:
+            blocks.append(runtime_note)
+        blocks.append("Task:\nSuggest the best authorities for the selected passage in this document.")
+        return "\n\n".join(block for block in blocks if block).strip()
 
     def _transcript_block(self, transcript_messages: list[Any]) -> str:
         if not transcript_messages:
