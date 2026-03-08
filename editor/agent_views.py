@@ -42,6 +42,7 @@ def _serialize_run(run, *, include_result=False):
         "response_count": run.response_count,
         "local_function_rounds": run.local_function_rounds,
         "usage": run.usage or {},
+        "metrics": (run.metadata or {}).get("metrics") or {},
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,

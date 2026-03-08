@@ -118,6 +118,30 @@ _STAGE_TO_PHASE = {
     "cancelled": _RUN_PHASE_CANCELLED,
 }
 
+_MODE_TOOL_POLICY = {
+    "chat": {
+        "include_web_search": True,
+        "web_search_context_size": "medium",
+        "include_client_docs": True,
+        "include_knowledge": True,
+        "include_file_search": True,
+    },
+    "suggest": {
+        "include_web_search": True,
+        "web_search_context_size": "low",
+        "include_client_docs": True,
+        "include_knowledge": True,
+        "include_file_search": True,
+    },
+    "edit": {
+        "include_web_search": True,
+        "web_search_context_size": "medium",
+        "include_client_docs": True,
+        "include_knowledge": True,
+        "include_file_search": True,
+    },
+}
+
 _CHAT_SYSTEM_PROMPT = """You are Hammond Law's document-side immigration research agent.
 You work alongside the attorney inside a live drafting session.
 
@@ -406,10 +430,10 @@ def _build_biaedge_mcp_tool(*, allowed_tools: list[str]) -> dict[str, Any]:
     return tool
 
 
-def _build_web_search_tool() -> dict[str, Any]:
+def _build_web_search_tool(*, search_context_size: str = "medium") -> dict[str, Any]:
     return {
         "type": "web_search_preview",
-        "search_context_size": "medium",
+        "search_context_size": search_context_size,
         "user_location": {
             "type": "approximate",
             "country": "US",
@@ -1069,6 +1093,26 @@ def _evidence_pack_text(pack: dict[str, Any]) -> str:
             total_chars += len(line)
 
     return "\n".join(lines).strip()
+
+
+def _tool_usage_metrics(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    source_counts: dict[str, int] = {}
+    tool_name_counts: dict[str, int] = {}
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if source:
+            source_counts[source] = source_counts.get(source, 0) + 1
+        if name:
+            tool_name_counts[name] = tool_name_counts.get(name, 0) + 1
+    return {
+        "tool_call_count": len(tool_calls or []),
+        "tool_source_counts": source_counts,
+        "tool_name_counts": tool_name_counts,
+        "used_sources": sorted(source_counts.keys()),
+    }
 
 
 def _pending_function_calls(response: Any) -> list[Any]:
@@ -1738,14 +1782,21 @@ class DocumentResearchAgent:
 
     def _build_tools(self, *, mode: str, include_mcp: bool = True) -> list[dict[str, Any]]:
         allowed_tools = _BIAEDGE_SUGGEST_TOOLS if mode == "suggest" else _BIAEDGE_CHAT_TOOLS
-        tools = [_build_web_search_tool()]
-        if self.has_client_files:
+        policy = _MODE_TOOL_POLICY.get(mode, _MODE_TOOL_POLICY["chat"])
+        tools: list[dict[str, Any]] = []
+        if policy.get("include_web_search", True):
+            tools.append(
+                _build_web_search_tool(
+                    search_context_size=str(policy.get("web_search_context_size") or "medium")
+                )
+            )
+        if self.has_client_files and policy.get("include_client_docs", True):
             tools.extend(_client_file_function_tools())
-        if self.has_active_exemplars:
+        if self.has_active_exemplars and policy.get("include_knowledge", True):
             tools.extend(_knowledge_function_tools())
         if include_mcp:
             tools.insert(0, _build_biaedge_mcp_tool(allowed_tools=allowed_tools))
-        file_search = _build_file_search_tool()
+        file_search = _build_file_search_tool() if policy.get("include_file_search", True) else None
         if file_search:
             tools.append(file_search)
         return tools
@@ -1763,8 +1814,11 @@ class DocumentResearchAgent:
             "continuation_attempts": 0,
             "answer_fragments": [],
             "usage_by_response_id": {},
+            "phase_history": [],
+            "finalization_source": "",
             "requirements": {},
             "evidence_pack": _build_evidence_pack([]),
+            "metrics": {},
             "prompt_cache_key": self._prompt_cache_key(mode),
         }
 
@@ -1809,15 +1863,39 @@ class DocumentResearchAgent:
 
     def _refresh_run_evidence_pack(self, *, run: DocumentResearchRun) -> None:
         metadata = dict(run.metadata or {})
-        metadata["evidence_pack"] = _build_evidence_pack(run.tool_calls or [])
+        evidence_pack = _build_evidence_pack(run.tool_calls or [])
+        metadata["evidence_pack"] = evidence_pack
+        metadata["metrics"] = {
+            "phase": str(metadata.get("phase") or _stage_phase(run.stage)),
+            "response_count": int(run.response_count or 0),
+            "local_function_rounds": int(run.local_function_rounds or 0),
+            "finalization_source": str(metadata.get("finalization_source") or "").strip(),
+            "evidence_counts": evidence_pack.get("counts") or {},
+            **_tool_usage_metrics(run.tool_calls or []),
+        }
         run.metadata = metadata
 
     def _set_run_phase(self, *, run: DocumentResearchRun, phase: str, stage: str | None = None) -> None:
         metadata = dict(run.metadata or {})
+        history = [
+            item for item in (metadata.get("phase_history") or [])
+            if isinstance(item, dict)
+        ]
         metadata["phase"] = phase
         if stage is not None:
             run.stage = stage
+        current_stage = run.stage or stage or ""
+        if not history or history[-1].get("phase") != phase or history[-1].get("stage") != current_stage:
+            history.append(
+                {
+                    "phase": phase,
+                    "stage": current_stage,
+                    "at": timezone.now().isoformat(),
+                }
+            )
+        metadata["phase_history"] = history[-12:]
         run.metadata = metadata
+        self._refresh_run_evidence_pack(run=run)
 
     def _missing_full_text_sources_for_run(self, *, run: DocumentResearchRun) -> list[str]:
         requested_sources = self._requested_full_text_sources_for_run(run=run)
@@ -2167,11 +2245,15 @@ class DocumentResearchAgent:
         stage: str,
         note: str,
         allow_over_budget: bool = False,
+        finalization_source: str = "",
     ) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
         if allow_over_budget:
             metadata["allow_over_budget_finalization"] = True
+        if finalization_source:
+            metadata["finalization_source"] = finalization_source
         run.metadata = metadata
+        self._refresh_run_evidence_pack(run=run)
         compact_input = self._finalization_input_from_run(run=run)
         try:
             follow_up = self._create_background_response(
@@ -2225,6 +2307,7 @@ class DocumentResearchAgent:
                 "Do not call any more tools."
             ),
             allow_over_budget=True,
+            finalization_source="budget_recovery",
         )
 
     def _recover_failed_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun | None:
@@ -2245,6 +2328,7 @@ class DocumentResearchAgent:
                 "Using only the verified research already gathered, provide the final answer now. "
                 "Do not call any more tools."
             ),
+            finalization_source="failed_recovery",
         )
 
     def _continue_incomplete_response(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
@@ -2353,6 +2437,7 @@ class DocumentResearchAgent:
                         "Do not call any more tools."
                     ),
                     allow_over_budget=True,
+                    finalization_source="local_tool_budget",
                 )
             return self._mark_run_failed(run, budget_error)
 
@@ -2392,6 +2477,7 @@ class DocumentResearchAgent:
                 "Provide the final answer now using only the verified research already gathered. "
                 "Do not call any more tools."
             ),
+            finalization_source="empty_response",
         )
 
     def _queue_json_repair(self, *, run: DocumentResearchRun, response: Any) -> DocumentResearchRun:
@@ -2400,7 +2486,9 @@ class DocumentResearchAgent:
             return self._mark_run_failed(run, _structured_result_failure_message(run.mode))
 
         metadata["json_repair_attempted"] = True
+        metadata["finalization_source"] = "json_repair"
         run.metadata = metadata
+        self._refresh_run_evidence_pack(run=run)
         try:
             repair_response = self._create_background_response(
                 instructions=(
@@ -2431,6 +2519,10 @@ class DocumentResearchAgent:
 
     def _finalize_chat_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
         metadata = dict(run.metadata or {})
+        if not metadata.get("finalization_source"):
+            metadata["finalization_source"] = "normal"
+            run.metadata = metadata
+            self._refresh_run_evidence_pack(run=run)
         result_payload = {
             "answer": answer,
             "response_id": (getattr(response, "id", "") or "").strip(),
@@ -2446,6 +2538,11 @@ class DocumentResearchAgent:
         return self._mark_run_completed(run, result_payload=result_payload, response=response)
 
     def _finalize_suggest_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if not metadata.get("finalization_source"):
+            metadata["finalization_source"] = "normal"
+            run.metadata = metadata
+            self._refresh_run_evidence_pack(run=run)
         parsed = _extract_json_object(answer)
         if parsed is None:
             return self._queue_json_repair(run=run, response=response)
@@ -2471,6 +2568,11 @@ class DocumentResearchAgent:
         return self._mark_run_completed(run, result_payload=result_payload, response=response)
 
     def _finalize_edit_run(self, *, run: DocumentResearchRun, response: Any, answer: str) -> DocumentResearchRun:
+        metadata = dict(run.metadata or {})
+        if not metadata.get("finalization_source"):
+            metadata["finalization_source"] = "normal"
+            run.metadata = metadata
+            self._refresh_run_evidence_pack(run=run)
         parsed = _extract_json_object(answer)
         if parsed is None:
             return self._queue_json_repair(run=run, response=response)

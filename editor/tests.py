@@ -651,6 +651,18 @@ class AgentServiceTests(TestCase):
         self.assertFalse(any(tool.get("type") == "function" for tool in tools))
 
     @patch("editor.agent_service._new_openai_client")
+    def test_build_tools_uses_low_context_web_search_for_suggest(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+
+        tools = agent._build_tools(mode="suggest", include_mcp=False)
+        web_tool = next(tool for tool in tools if tool.get("type") == "web_search_preview")
+
+        self.assertEqual(web_tool["search_context_size"], "low")
+
+    @patch("editor.agent_service._new_openai_client")
     def test_build_tools_includes_client_document_functions_when_current_document_has_uploads(self, new_client):
         DocumentClientFile.objects.create(
             document=self.document,
@@ -957,6 +969,9 @@ class AgentServiceTests(TestCase):
         self.assertEqual(evidence_pack["counts"]["legal_authorities"], 1)
         self.assertEqual(evidence_pack["legal_authorities"][0]["tool"], "get_reference")
         self.assertIn("waiver filing basis", evidence_pack["legal_authorities"][0]["excerpt"])
+        metrics = (run.metadata or {}).get("metrics") or {}
+        self.assertEqual(metrics["tool_source_counts"]["biaedge"], 1)
+        self.assertIn("biaedge", metrics["used_sources"])
 
     def test_normalize_edit_result_falls_back_to_append_without_selected_text(self):
         normalized = _normalize_edit_result(
@@ -1070,6 +1085,8 @@ class AgentServiceTests(TestCase):
         self.assertEqual(request["tool_choice"], "none")
         self.assertIn("Evidence pack:", request["input_payload"])
         self.assertIn("waiver filing basis", request["input_payload"])
+        self.assertEqual(updated.metadata["finalization_source"], "empty_response")
+        self.assertEqual(updated.metadata["metrics"]["finalization_source"], "empty_response")
 
     @patch("editor.agent_service._new_openai_client")
     def test_failed_status_with_tool_budget_has_clearer_error_message(self, new_client):
