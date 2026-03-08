@@ -9,8 +9,11 @@ from django.urls import reverse
 from docx import Document as DocxDocument
 
 from .agent_service import (
+    AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
+    AGENT_FINALIZATION_REASONING_EFFORT,
     AgentConfigurationError,
     DocumentResearchAgent,
+    _extract_output_text,
     _knowledge_function_tools,
     _normalize_mcp_server_url,
 )
@@ -513,6 +516,27 @@ class AgentServiceTests(TestCase):
         forced_request = create_response.call_args_list[1].kwargs
         self.assertEqual(forced_request["tools"], [])
         self.assertEqual(forced_request["previous_response_id"], "resp_tool_only")
+        self.assertEqual(forced_request["tool_choice"], "none")
+        self.assertEqual(forced_request["max_output_tokens"], AGENT_FINALIZATION_MAX_OUTPUT_TOKENS)
+        self.assertEqual(forced_request["reasoning_effort"], AGENT_FINALIZATION_REASONING_EFFORT)
+
+    def test_extract_output_text_reads_refusal_parts(self):
+        response = SimpleNamespace(
+            output_text="",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            type="refusal",
+                            refusal="I can’t comply with that request.",
+                        )
+                    ],
+                )
+            ],
+        )
+
+        self.assertEqual(_extract_output_text(response), "I can’t comply with that request.")
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
@@ -563,12 +587,16 @@ class AgentServiceTests(TestCase):
         )
 
         agent.client.responses.retrieve = lambda *args, **kwargs: failed_response
-        with patch.object(agent, "_create_background_response", return_value=recovery_response):
+        with patch.object(agent, "_create_background_response", return_value=recovery_response) as create_background:
             updated = agent.advance_run(run=run)
 
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.stage, "recovering_failure")
         self.assertEqual(updated.response_id, "resp_recover")
+        recovery_request = create_background.call_args.kwargs
+        self.assertEqual(recovery_request["tool_choice"], "none")
+        self.assertEqual(recovery_request["max_output_tokens"], AGENT_FINALIZATION_MAX_OUTPUT_TOKENS)
+        self.assertEqual(recovery_request["reasoning_effort"], AGENT_FINALIZATION_REASONING_EFFORT)
 
     @patch("editor.agent_service._new_openai_client")
     def test_failed_status_with_tool_budget_has_clearer_error_message(self, new_client):

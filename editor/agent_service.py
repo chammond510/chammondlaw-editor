@@ -24,6 +24,15 @@ AGENT_MAX_RESPONSES_PER_RUN = int(os.environ.get("OPENAI_AGENT_MAX_RESPONSES_PER
 AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "4"))
 AGENT_MAX_TOTAL_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_TOTAL_TOKENS", "120000"))
 AGENT_MAX_REASONING_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_REASONING_TOKENS", "40000"))
+AGENT_FINALIZATION_REASONING_EFFORT = (
+    os.environ.get("OPENAI_AGENT_FINALIZATION_REASONING_EFFORT", "low").strip().lower() or "low"
+)
+AGENT_FINALIZATION_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("OPENAI_AGENT_FINALIZATION_MAX_OUTPUT_TOKENS", "900")
+)
+AGENT_JSON_REPAIR_REASONING_EFFORT = (
+    os.environ.get("OPENAI_AGENT_JSON_REPAIR_REASONING_EFFORT", "none").strip().lower() or "none"
+)
 KNOWLEDGE_VECTOR_STORE_IDS = [
     value.strip()
     for value in os.environ.get("OPENAI_AGENT_KNOWLEDGE_VECTOR_STORE_ID", "").split(",")
@@ -481,6 +490,10 @@ def _extract_output_text(response: Any) -> str:
                 text = getattr(part, "text", "") or ""
                 if text:
                     chunks.append(text)
+            elif getattr(part, "type", None) == "refusal":
+                refusal = getattr(part, "refusal", "") or ""
+                if refusal:
+                    chunks.append(refusal)
     return "\n".join(chunks).strip()
 
 
@@ -1125,6 +1138,7 @@ class DocumentResearchAgent:
         tool_choice: str,
         max_output_tokens: int,
         mode: str,
+        reasoning_effort: str | None = None,
     ):
         request = {
             "model": AGENT_MODEL,
@@ -1135,7 +1149,7 @@ class DocumentResearchAgent:
             "parallel_tool_calls": True,
             "max_tool_calls": AGENT_MAX_TOOL_CALLS,
             "max_output_tokens": max_output_tokens,
-            "reasoning": {"effort": _normalize_reasoning_effort(AGENT_REASONING_EFFORT)},
+            "reasoning": {"effort": _normalize_reasoning_effort(reasoning_effort or AGENT_REASONING_EFFORT)},
             "store": True,
             "background": True,
             "include": list(_TOOL_INCLUDE_FIELDS),
@@ -1350,9 +1364,10 @@ class DocumentResearchAgent:
                 ),
                 tools=[],
                 previous_response_id=(getattr(response, "id", "") or "").strip() or None,
-                tool_choice="auto",
-                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                tool_choice="none",
+                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
                 mode=run.mode,
+                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
             )
         except AgentExecutionError:
             return None
@@ -1478,9 +1493,10 @@ class DocumentResearchAgent:
                 ],
                 tools=[],
                 previous_response_id=(getattr(response, "id", "") or "").strip() or None,
-                tool_choice="auto",
-                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                tool_choice="none",
+                max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
                 mode=run.mode,
+                reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
             )
         except AgentExecutionError as exc:
             return self._mark_run_failed(run, str(exc))
@@ -1507,9 +1523,10 @@ class DocumentResearchAgent:
                 ),
                 tools=[],
                 previous_response_id=(getattr(response, "id", "") or "").strip() or None,
-                tool_choice="auto",
+                tool_choice="none",
                 max_output_tokens=_JSON_REPAIR_MAX_OUTPUT_TOKENS,
                 mode=run.mode,
+                reasoning_effort=AGENT_JSON_REPAIR_REASONING_EFFORT,
             )
         except AgentExecutionError as exc:
             return self._mark_run_failed(run, str(exc))
@@ -1596,8 +1613,9 @@ class DocumentResearchAgent:
             input_payload=follow_up_input,
             tools=[],
             previous_response_id=previous_id,
-            tool_choice="auto",
-            max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+            tool_choice="none",
+            max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
+            reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
         )
 
         answer = _extract_output_text(follow_up)
@@ -1721,6 +1739,7 @@ class DocumentResearchAgent:
         previous_response_id: str | None,
         tool_choice: str,
         max_output_tokens: int,
+        reasoning_effort: str | None = None,
     ):
         request = {
             "model": AGENT_MODEL,
@@ -1731,7 +1750,7 @@ class DocumentResearchAgent:
             "parallel_tool_calls": True,
             "max_tool_calls": AGENT_MAX_TOOL_CALLS,
             "max_output_tokens": max_output_tokens,
-            "reasoning": {"effort": _normalize_reasoning_effort(AGENT_REASONING_EFFORT)},
+            "reasoning": {"effort": _normalize_reasoning_effort(reasoning_effort or AGENT_REASONING_EFFORT)},
             "store": True,
             "include": list(_TOOL_INCLUDE_FIELDS),
             "truncation": "auto",
