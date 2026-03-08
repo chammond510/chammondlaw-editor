@@ -672,6 +672,67 @@ class AgentServiceTests(TestCase):
         self.assertIn("get_client_document", function_names)
 
     @patch("editor.agent_service._new_openai_client")
+    def test_local_function_budget_forces_final_response_instead_of_failing(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="running_tools",
+            response_id="resp_local_tools",
+            metadata=agent._initial_run_metadata(mode="edit", previous_response_id=""),
+        )
+        response = SimpleNamespace(id="resp_local_tools")
+        function_call = SimpleNamespace(
+            name="search_client_documents",
+            call_id="call_client_doc_search",
+            arguments='{"query":"draft statement","limit":2}',
+        )
+        queued_response = SimpleNamespace(id="resp_forced_final", status="queued", error=None, usage=None, output=[])
+
+        with patch("editor.agent_service.AGENT_MAX_LOCAL_FUNCTION_ROUNDS", 0):
+            with patch.object(agent, "_call_local_tool", return_value={"results": [{"id": 1, "title": "Draft Statement"}]}):
+                with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+                    updated = agent._continue_after_function_calls(
+                        run=run,
+                        response=response,
+                        function_calls=[function_call],
+                    )
+
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.stage, "forcing_final")
+        self.assertEqual(updated.response_id, "resp_forced_final")
+        self.assertTrue(updated.metadata.get("allow_over_budget_finalization"))
+        request = create_background.call_args.kwargs
+        self.assertEqual(request["tools"], [])
+        self.assertEqual(request["tool_choice"], "none")
+        self.assertEqual(request["max_output_tokens"], AGENT_FINALIZATION_MAX_OUTPUT_TOKENS)
+        self.assertEqual(request["reasoning_effort"], AGENT_FINALIZATION_REASONING_EFFORT)
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_budget_error_allows_forced_finalization_after_local_tool_cap(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="in_progress",
+            stage="forcing_final",
+            local_function_rounds=9,
+            metadata={"allow_over_budget_finalization": True},
+        )
+
+        with patch("editor.agent_service.AGENT_MAX_LOCAL_FUNCTION_ROUNDS", 8):
+            self.assertEqual(agent._budget_error(run), "")
+
+    @patch("editor.agent_service._new_openai_client")
     def test_run_response_loop_forces_final_answer_after_tool_only_round(self, new_client):
         agent = DocumentResearchAgent(
             document=self.document,

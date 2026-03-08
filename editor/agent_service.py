@@ -22,7 +22,7 @@ AGENT_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_OUTPUT_TOKENS", "
 AGENT_HTTP_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AGENT_HTTP_TIMEOUT_SECONDS", "25"))
 AGENT_MAX_RUN_SECONDS = int(os.environ.get("OPENAI_AGENT_MAX_RUN_SECONDS", "300"))
 AGENT_MAX_RESPONSES_PER_RUN = int(os.environ.get("OPENAI_AGENT_MAX_RESPONSES_PER_RUN", "8"))
-AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "4"))
+AGENT_MAX_LOCAL_FUNCTION_ROUNDS = int(os.environ.get("OPENAI_AGENT_MAX_LOCAL_FUNCTION_ROUNDS", "8"))
 AGENT_MAX_TOTAL_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_TOTAL_TOKENS", "120000"))
 AGENT_MAX_REASONING_TOKENS = int(os.environ.get("OPENAI_AGENT_MAX_REASONING_TOKENS", "40000"))
 AGENT_FINALIZATION_REASONING_EFFORT = (
@@ -104,10 +104,11 @@ Research operating rules:
 8. If you rely on uploaded client documents for a factual statement or quote, retrieve the relevant client file first.
 9. If controlling authority is thin or uncertain, say so directly.
 10. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
-11. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
-12. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
-13. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
-14. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
+11. Use search_client_documents or search_exemplars first, then retrieve only the one or two files you actually need.
+12. Avoid repeated searches for the same citation or issue unless the earlier result was clearly insufficient.
+13. Use get_document_text sparingly. Prefer short targeted excerpts and avoid requesting very large full-text pulls unless they are truly necessary.
+14. Honor the Turn requirements block in the input. If it requires exact quotes or full-text verification, complete that before answering.
+15. Once you have enough verified authority to answer the attorney, stop calling tools and give the answer.
 
 Output style:
 - Be direct, practical, and collaborative.
@@ -1873,6 +1874,8 @@ class DocumentResearchAgent:
         if int(run.response_count or 0) > AGENT_MAX_RESPONSES_PER_RUN:
             return f"The agent run exceeded the response budget of {AGENT_MAX_RESPONSES_PER_RUN} OpenAI responses."
         if int(run.local_function_rounds or 0) > AGENT_MAX_LOCAL_FUNCTION_ROUNDS:
+            if bool((run.metadata or {}).get("allow_over_budget_finalization")):
+                return ""
             return (
                 "The agent run exceeded the local tool continuation budget of "
                 f"{AGENT_MAX_LOCAL_FUNCTION_ROUNDS} rounds."
@@ -2009,6 +2012,37 @@ class DocumentResearchAgent:
         run.tool_calls = _merge_unique_records(run.tool_calls or [], local_tool_calls)
         budget_error = self._budget_error(run)
         if budget_error:
+            if "local tool continuation budget" in budget_error:
+                metadata = dict(run.metadata or {})
+                metadata["allow_over_budget_finalization"] = True
+                run.metadata = metadata
+                try:
+                    follow_up = self._create_background_response(
+                        instructions=(
+                            self._run_instructions(run)
+                            + "\n\nYou now have the local tool results you need for this turn. "
+                            + "Provide the final answer now and do not call any more tools."
+                        ),
+                        input_payload=outputs + [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Using the local tool outputs just returned, provide the final answer now. "
+                                    "Do not call any more tools."
+                                ),
+                            }
+                        ],
+                        tools=[],
+                        previous_response_id=(getattr(response, "id", "") or "").strip() or None,
+                        tool_choice="none",
+                        max_output_tokens=AGENT_FINALIZATION_MAX_OUTPUT_TOKENS,
+                        mode=run.mode,
+                        reasoning_effort=AGENT_FINALIZATION_REASONING_EFFORT,
+                    )
+                except AgentExecutionError as exc:
+                    return self._mark_run_failed(run, str(exc))
+                run.previous_response_id = (getattr(response, "id", "") or "").strip()
+                return self._attach_started_response(run=run, response=follow_up, stage="forcing_final")
             return self._mark_run_failed(run, budget_error)
 
         try:
