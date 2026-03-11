@@ -10,6 +10,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from docx import Document as DocxDocument
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 
 from .agent_service import (
@@ -27,6 +28,7 @@ from .agent_service import (
     _request_requirements_block,
     _requested_full_text_sources,
 )
+from .export import tiptap_to_docx, tiptap_to_html
 from .import_service import import_docx_to_tiptap
 from .models import (
     Document,
@@ -596,6 +598,70 @@ class AgentResearchViewsTests(TestCase):
         results = list_response.json()["results"]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Police Report")
+
+
+class EditorViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="editor-user", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="I-130 Cover Letter",
+            slug="i-130-cover-letter-editor",
+            category="cover_letter",
+            template_content=_sample_tiptap("Template"),
+        )
+        self.document = Document.objects.create(
+            title="Draft Cover Letter",
+            document_type=self.document_type,
+            content=_sample_tiptap("Opening paragraph."),
+            created_by=self.user,
+        )
+
+    def test_editor_page_renders_enhanced_writing_controls(self):
+        response = self.client.get(reverse("editor", kwargs={"doc_id": self.document.id}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="block-style-select"', html=False)
+        self.assertContains(response, 'id="outline-sidebar"', html=False)
+        self.assertContains(response, 'id="editor-statusbar"', html=False)
+        self.assertContains(response, 'id="focus-toggle"', html=False)
+        self.assertContains(response, '@tiptap/extension-text-align', html=False)
+        self.assertContains(response, 'Cmd/Ctrl+K link', html=False)
+
+
+class ExportFormattingTests(TestCase):
+    def test_docx_export_preserves_heading_alignment(self):
+        content = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "heading",
+                    "attrs": {"level": 2, "textAlign": "center"},
+                    "content": [{"type": "text", "text": "Centered Heading"}],
+                }
+            ],
+        }
+
+        docx_buffer = tiptap_to_docx(content, title="Aligned Heading", export_format="court_brief")
+        exported = DocxDocument(BytesIO(docx_buffer.getvalue()))
+
+        self.assertEqual(exported.paragraphs[0].text, "Centered Heading")
+        self.assertEqual(exported.paragraphs[0].alignment, WD_ALIGN_PARAGRAPH.CENTER)
+
+    def test_html_export_preserves_heading_alignment(self):
+        content = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "heading",
+                    "attrs": {"level": 2, "textAlign": "center"},
+                    "content": [{"type": "text", "text": "Centered Heading"}],
+                }
+            ],
+        }
+
+        html = tiptap_to_html(content, title="Aligned Heading", export_format="court_brief")
+        self.assertIn('<h2 style="text-align:center;">Centered Heading</h2>', html)
 
 
 class AgentServiceTests(TestCase):

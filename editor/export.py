@@ -348,6 +348,17 @@ def _render_signature_block(doc, signature_samples):
         _copy_run_style(run, sample.runs[0] if sample.runs else None)
 
 
+def _apply_text_alignment(paragraph, alignment):
+    if alignment == "center":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    elif alignment == "right":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    elif alignment == "justify":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    elif alignment == "left":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+
 def _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run):
     for part in inline_parts:
         part_type = part.get("type")
@@ -371,9 +382,11 @@ def _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run):
             paragraph.add_run().add_break(WD_BREAK.LINE)
 
 
-def _add_paragraph_from_parts(doc, sample, inline_parts):
+def _add_paragraph_from_parts(doc, sample, inline_parts, alignment=None):
     paragraph = doc.add_paragraph()
     _copy_paragraph_style(paragraph, sample)
+    if alignment:
+        _apply_text_alignment(paragraph, alignment)
     sample_run = sample.runs[0] if sample.runs else None
     _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run)
     return paragraph
@@ -427,9 +440,11 @@ def _is_exhibit_category(text):
     return text.endswith(":") and len(text) <= 120
 
 
-def _render_re_line(doc, sample, text):
+def _render_re_line(doc, sample, text, alignment=None):
     paragraph = doc.add_paragraph()
     _copy_paragraph_style(paragraph, sample)
+    if alignment:
+        _apply_text_alignment(paragraph, alignment)
     subject = text[3:].strip() if text.startswith("RE:") else text.strip()
     label_run = paragraph.add_run("RE:")
     _copy_run_style(label_run, sample.runs[0] if sample.runs else None)
@@ -441,17 +456,21 @@ def _render_re_line(doc, sample, text):
     return paragraph
 
 
-def _render_subject_detail(doc, sample, text):
+def _render_subject_detail(doc, sample, text, alignment=None):
     paragraph = doc.add_paragraph()
     _copy_paragraph_style(paragraph, sample)
+    if alignment:
+        _apply_text_alignment(paragraph, alignment)
     run = paragraph.add_run(text)
     _copy_run_style(run, sample.runs[0] if sample.runs else None)
     return paragraph
 
 
-def _render_exhibit_heading(doc, sample, text):
+def _render_exhibit_heading(doc, sample, text, alignment=None):
     paragraph = doc.add_paragraph()
     _copy_paragraph_style(paragraph, sample)
+    if alignment:
+        _apply_text_alignment(paragraph, alignment)
     run = paragraph.add_run(text if text.endswith(":") else f"{text}:")
     _copy_run_style(run, sample.runs[0] if sample.runs else None)
     return paragraph
@@ -500,6 +519,7 @@ def _render_exhibit_table(doc, items, samples, counter_start):
 def _process_cover_letter_node(doc, node, samples, state):
     node_type = node.get("type", "")
     text = _node_plain_text(node)
+    alignment = node.get("attrs", {}).get("textAlign")
 
     if state["signature_started"]:
         return
@@ -518,35 +538,35 @@ def _process_cover_letter_node(doc, node, samples, state):
         inline_parts = _extract_inline_parts(node)
         if not state["body_started"]:
             if text.startswith("Via "):
-                _add_paragraph_from_parts(doc, samples["service_line"], inline_parts)
+                _add_paragraph_from_parts(doc, samples["service_line"], inline_parts, alignment=alignment)
                 return
             if DATE_PATTERN.match(text):
-                _add_paragraph_from_parts(doc, samples["date_line"], inline_parts)
+                _add_paragraph_from_parts(doc, samples["date_line"], inline_parts, alignment=alignment)
                 return
             if text.startswith("RE:"):
-                _render_re_line(doc, samples["re_line"], text)
+                _render_re_line(doc, samples["re_line"], text, alignment=alignment)
                 state["saw_re_line"] = True
                 return
             if _looks_like_subject_detail(text):
-                _render_subject_detail(doc, samples["subject_line"], text)
+                _render_subject_detail(doc, samples["subject_line"], text, alignment=alignment)
                 return
             if text.lower().startswith("dear "):
-                _add_paragraph_from_parts(doc, samples["salutation"], inline_parts)
+                _add_paragraph_from_parts(doc, samples["salutation"], inline_parts, alignment=alignment)
                 state["body_started"] = True
                 return
-            _add_paragraph_from_parts(doc, samples["address_line"], inline_parts)
+            _add_paragraph_from_parts(doc, samples["address_line"], inline_parts, alignment=alignment)
             return
 
         if _is_exhibit_heading(text):
             state["in_exhibit_section"] = True
-            _add_paragraph_from_parts(doc, samples["body"], inline_parts)
+            _add_paragraph_from_parts(doc, samples["body"], inline_parts, alignment=alignment)
             return
         if state["in_exhibit_section"] and _is_exhibit_category(text):
-            _render_exhibit_heading(doc, samples["exhibit_category"], text)
+            _render_exhibit_heading(doc, samples["exhibit_category"], text, alignment=alignment)
             return
 
         sample = samples["intro"] if state["intro_paragraphs_written"] < 2 else samples["body"]
-        _add_paragraph_from_parts(doc, sample, inline_parts)
+        _add_paragraph_from_parts(doc, sample, inline_parts, alignment=alignment)
         state["intro_paragraphs_written"] += 1
         return
 
@@ -555,16 +575,18 @@ def _process_cover_letter_node(doc, node, samples, state):
             return
         level = node.get("attrs", {}).get("level", 1)
         if not state["body_started"] and level == 1 and not state["saw_re_line"]:
-            _render_re_line(doc, samples["re_line"], f"RE: {text.title() if text.isupper() else text}")
+            _render_re_line(doc, samples["re_line"], f"RE: {text.title() if text.isupper() else text}", alignment=alignment)
             state["saw_re_line"] = True
             return
         if _is_exhibit_heading(text):
             state["in_exhibit_section"] = True
         if state["in_exhibit_section"] and level >= 3:
-            _render_exhibit_heading(doc, samples["exhibit_category"], text)
+            _render_exhibit_heading(doc, samples["exhibit_category"], text, alignment=alignment)
             return
         paragraph = doc.add_paragraph()
         _copy_paragraph_style(paragraph, samples["section_heading"])
+        if alignment:
+            _apply_text_alignment(paragraph, alignment)
         run = paragraph.add_run(text)
         _copy_run_style(run, samples["section_heading"].runs[0] if samples["section_heading"].runs else None)
         run.bold = True
@@ -625,6 +647,7 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
         inline_parts = _extract_inline_parts(node)
         p = doc.add_heading(level=level)
         _apply_text_parts(p, inline_parts, footnotes)
+        _apply_text_alignment(p, node.get("attrs", {}).get("textAlign"))
 
     elif node_type == "paragraph":
         inline_parts = _extract_inline_parts(node)
@@ -648,13 +671,7 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
             _apply_text_parts(p, inline_parts, footnotes)
 
         # Handle text alignment
-        alignment = node.get("attrs", {}).get("textAlign")
-        if alignment == "center":
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        elif alignment == "right":
-            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        elif alignment == "justify":
-            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        _apply_text_alignment(p, node.get("attrs", {}).get("textAlign"))
 
     elif node_type == "bulletList":
         for item in node.get("content", []):
@@ -937,9 +954,12 @@ def _render_node_html(node):
         style = f' style="text-align:{align};"' if align else ""
         return f"<p{style}>{_render_inline_html(node.get('content', []))}</p>"
     if node_type == "heading":
-        level = node.get("attrs", {}).get("level", 1)
+        attrs = node.get("attrs", {})
+        level = attrs.get("level", 1)
         level = max(1, min(3, int(level)))
-        return f"<h{level}>{_render_inline_html(node.get('content', []))}</h{level}>"
+        align = attrs.get("textAlign")
+        style = f' style="text-align:{align};"' if align else ""
+        return f"<h{level}{style}>{_render_inline_html(node.get('content', []))}</h{level}>"
     if node_type == "bulletList":
         items = "".join(_render_list_item_html(item) for item in node.get("content", []))
         return f"<ul>{items}</ul>"

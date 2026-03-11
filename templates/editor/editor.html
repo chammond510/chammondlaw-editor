@@ -16,77 +16,160 @@
     .tiptap-editor hr.page-break-node { border-top: 2px dashed #9ca3af; position: relative; margin: 2em 0; }
     .tiptap-editor hr.page-break-node::after { content: 'Page Break'; position: absolute; right: 0; top: -10px; font-size: 11px; color: #6b7280; background: white; padding: 0 4px; }
     .tiptap-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; color: #adb5bd; pointer-events: none; height: 0; }
+    .editor-link { color: #1B2A4A; text-decoration: underline; text-decoration-color: #C5A55A; text-underline-offset: 2px; }
     .toolbar-btn { transition: all 0.1s; }
     .toolbar-btn:hover { background-color: #e5e7eb; }
     .toolbar-btn.is-active { background-color: #1B2A4A; color: white; }
+    .toolbar-group { display: flex; align-items: center; gap: 0.25rem; border: 1px solid #e5e7eb; border-radius: 0.8rem; background: #fff; padding: 0.25rem 0.375rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+    .toolbar-select { border: none; background: transparent; border-radius: 0.6rem; color: #374151; font-size: 0.75rem; line-height: 1rem; padding: 0.35rem 0.5rem; min-width: 9rem; }
+    .toolbar-select:focus { outline: none; box-shadow: 0 0 0 2px rgba(27, 42, 74, 0.12); }
+    .toolbar-divider { width: 1px; align-self: stretch; background: #e5e7eb; }
     .footnote-ref-node { cursor: pointer; color: #1B2A4A; font-size: 0.85em; }
     .footnote-ref-node:hover { text-decoration: underline; }
     .research-open #research-sidebar { width: 420px; opacity: 1; }
     #research-sidebar { width: 0; opacity: 0; transition: width 0.2s ease, opacity 0.2s ease; position: relative; }
+    #outline-sidebar { width: 280px; opacity: 1; transition: width 0.2s ease, opacity 0.2s ease; }
+    #editor-shell.outline-hidden #outline-sidebar { width: 0; opacity: 0; border-right-width: 0; }
+    #editor-shell.outline-hidden #outline-sidebar > * { display: none; }
+    .outline-item { display: block; width: 100%; border: 1px solid transparent; border-radius: 0.85rem; padding: 0.7rem 0.85rem; text-align: left; transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
+    .outline-item:hover { background: #f8fafc; border-color: #e2e8f0; }
+    .outline-item-active { background: #1B2A4A; border-color: #1B2A4A; color: white; box-shadow: 0 12px 24px rgba(27, 42, 74, 0.12); }
+    .outline-item-active .outline-kicker,
+    .outline-item-active .outline-meta { color: rgba(255, 255, 255, 0.75); }
+    .editor-paper { box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }
+    #editor-statusbar { backdrop-filter: blur(12px); }
     .tab-btn-active { background-color: #1B2A4A; color: white; }
     .slash-item-active { background-color: #eef2ff; border-color: #c7d2fe; }
     .version-item-active { border-color: #1B2A4A; background: #f8fafc; }
     .diff-line-added { background: #ecfdf5; color: #166534; display: block; padding: 1px 4px; border-radius: 4px; }
     .diff-line-removed { background: #fef2f2; color: #991b1b; display: block; padding: 1px 4px; border-radius: 4px; }
     .diff-line-same { color: #6b7280; display: block; padding: 1px 4px; }
+    body.focus-mode #toolbar,
+    body.focus-mode #outline-sidebar,
+    body.focus-mode #editor-statusbar,
+    body.focus-mode #research-sidebar { display: none !important; }
+    body.focus-mode #editor-shell { height: calc(100vh - 84px); }
+    body.focus-mode .editor-paper { box-shadow: 0 24px 60px rgba(15, 23, 42, 0.14); }
+    @media (max-width: 1023px) {
+        #outline-sidebar { display: none !important; }
+        .outline-toggle-only { display: none !important; }
+        #editor-shell { height: auto; min-height: calc(100vh - 180px); }
+    }
 </style>
 {% endblock %}
 
 {% block body %}
-<div class="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-        <a href="{% url 'dashboard' %}" class="text-gray-400 hover:text-gray-600 transition-colors" title="Back to documents">
+<div class="bg-white border-b border-gray-200 px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <div class="flex items-start gap-3 min-w-0">
+        <a href="{% url 'dashboard' %}" class="text-gray-400 hover:text-gray-600 transition-colors mt-1" title="Back to documents">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
         </a>
-        <input type="text" id="doc-title" value="{{ document.title }}" class="text-lg font-semibold text-gray-900 border-none focus:outline-none focus:ring-0 bg-transparent w-96" placeholder="Untitled Document">
+        <div class="min-w-0">
+            <input type="text" id="doc-title" value="{{ document.title }}" class="text-lg font-semibold text-gray-900 border-none focus:outline-none focus:ring-0 bg-transparent w-full max-w-3xl" placeholder="Untitled Document">
+            <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                {% if document.document_type %}
+                <span class="inline-flex items-center rounded-full border border-navy/10 bg-navy/5 px-2 py-0.5 text-navy">{{ document.document_type.name }}</span>
+                {% endif %}
+                <span id="doc-stats-inline">0 words · 0 est. pages</span>
+                <span id="doc-context-inline">No selection</span>
+            </div>
+        </div>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center justify-end gap-2">
         <span id="save-status" class="text-xs text-gray-400">Saved</span>
+        <button id="outline-toggle" class="outline-toggle-only border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Hide Outline</button>
+        <button id="focus-toggle" class="border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Focus</button>
         <button id="open-versions" class="border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Versions</button>
         <a href="{% url 'export_docx' document.id %}" class="bg-navy text-white px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">Word</a>
         <a href="{% url 'export_pdf' document.id %}" class="bg-gold text-navy px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">PDF</a>
     </div>
 </div>
 
-<div id="toolbar" class="bg-white border-b border-gray-100 px-4 py-1.5 flex items-center gap-1 flex-wrap sticky top-0 z-10">
-    <button class="toolbar-btn p-1.5 rounded" data-action="bold">B</button>
-    <button class="toolbar-btn p-1.5 rounded italic" data-action="italic">I</button>
-    <button class="toolbar-btn p-1.5 rounded underline" data-action="underline">U</button>
-    <div class="w-px h-5 bg-gray-200 mx-1"></div>
-    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="1">H1</button>
-    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="2">H2</button>
-    <button class="toolbar-btn px-2 py-1 rounded text-xs font-bold" data-action="heading" data-level="3">H3</button>
-    <div class="w-px h-5 bg-gray-200 mx-1"></div>
-    <button class="toolbar-btn p-1.5 rounded" data-action="bulletList">• List</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="orderedList">1. List</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="blockquote">Quote</button>
-    <div class="w-px h-5 bg-gray-200 mx-1"></div>
-    <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="deleteRow">-Row</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="deleteColumn">-Col</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="mergeCells">Merge</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="splitCell">Split</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderRow">Hdr Row</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderColumn">Hdr Col</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
-    <div class="w-px h-5 bg-gray-200 mx-1"></div>
-    <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
-    <button id="open-footnotes" class="p-1.5 rounded border border-gray-300 text-xs">Manage Notes</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
-    <div class="w-px h-5 bg-gray-200 mx-1"></div>
-    <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
-    <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
+<div id="toolbar" class="bg-white border-b border-gray-100 px-4 py-2 flex items-center gap-2 flex-wrap sticky top-0 z-10">
+    <div class="toolbar-group">
+        <select id="block-style-select" class="toolbar-select" aria-label="Block style">
+            <option value="paragraph">Paragraph</option>
+            <option value="heading-1">Heading 1</option>
+            <option value="heading-2">Heading 2</option>
+            <option value="heading-3">Heading 3</option>
+            <option value="blockquote">Block Quote</option>
+        </select>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded" data-action="bold">B</button>
+        <button class="toolbar-btn p-1.5 rounded italic" data-action="italic">I</button>
+        <button class="toolbar-btn p-1.5 rounded underline" data-action="underline">U</button>
+        <button class="toolbar-btn px-2 py-1 rounded text-xs" data-action="clearFormatting">Clear</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="left">Left</button>
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="center">Center</button>
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="right">Right</button>
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="justify">Justify</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="setLink">Link</button>
+        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="unsetLink">Unlink</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded" data-action="bulletList">List</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="orderedList">Numbered</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="blockquote">Quote</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="deleteRow">-Row</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="deleteColumn">-Col</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="mergeCells">Merge</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="splitCell">Split</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderRow">Hdr Row</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderColumn">Hdr Col</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
+        <button id="open-footnotes" class="p-1.5 rounded border border-gray-300 text-xs">Manage Notes</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
+    </div>
+    <div class="toolbar-group">
+        <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
+        <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
+    </div>
     <div class="flex-grow"></div>
     <button id="research-toggle" class="bg-navy text-white px-3 py-1.5 rounded text-xs hover:bg-opacity-90">Research Agent</button>
 </div>
 
-<div id="editor-shell" class="flex h-[calc(100vh-110px)] overflow-hidden">
-    <div class="flex-1 overflow-y-auto">
-        <div class="max-w-4xl mx-auto px-6 py-8">
-            <div class="bg-white rounded-lg shadow-sm border border-gray-200 px-12 py-10 min-h-[70vh]">
-                <div id="editor" class="tiptap-editor"></div>
+<div id="editor-shell" class="flex h-[calc(100vh-136px)] overflow-hidden">
+    <aside id="outline-sidebar" class="bg-white border-r border-gray-200 h-full overflow-y-auto shrink-0">
+        <div class="p-4 border-b border-gray-100">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Document Outline</div>
+            <div id="outline-summary" class="mt-2 text-sm font-semibold text-navy">No headings yet</div>
+            <div id="outline-current" class="mt-1 text-xs text-gray-500">Add headings to build a navigable outline.</div>
+        </div>
+        <div id="outline-list" class="p-3 space-y-2"></div>
+    </aside>
+
+    <div id="editor-main" class="flex-1 min-w-0 flex flex-col">
+        <div class="flex-1 overflow-y-auto">
+            <div class="max-w-4xl mx-auto px-6 py-8">
+                <div class="editor-paper bg-white rounded-xl border border-gray-200 px-12 py-10 min-h-[70vh]">
+                    <div id="editor" class="tiptap-editor"></div>
+                </div>
+            </div>
+        </div>
+        <div id="editor-statusbar" class="border-t border-gray-200 bg-white/95 px-4 py-2 flex flex-col gap-2 text-xs text-gray-500 lg:flex-row lg:items-center lg:justify-between">
+            <div class="flex flex-wrap items-center gap-3">
+                <span id="status-words">0 words</span>
+                <span id="status-chars">0 chars</span>
+                <span id="status-pages">0 est. pages</span>
+                <span id="status-headings">0 headings</span>
+                <span id="status-footnotes">0 footnotes</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <span id="selection-stats">No selection</span>
+                <span class="hidden lg:inline">Shortcuts: Cmd/Ctrl+S save, Cmd/Ctrl+K link, / commands</span>
             </div>
         </div>
     </div>
@@ -332,7 +415,9 @@
   "@tiptap/core":"https://esm.sh/@tiptap/core@2.11.5",
   "@tiptap/starter-kit":"https://esm.sh/@tiptap/starter-kit@2.11.5",
   "@tiptap/extension-underline":"https://esm.sh/@tiptap/extension-underline@2.11.5",
+  "@tiptap/extension-link":"https://esm.sh/@tiptap/extension-link@2.11.5",
   "@tiptap/extension-placeholder":"https://esm.sh/@tiptap/extension-placeholder@2.11.5",
+  "@tiptap/extension-text-align":"https://esm.sh/@tiptap/extension-text-align@2.11.5",
   "@tiptap/extension-table":"https://esm.sh/@tiptap/extension-table@2.11.5",
   "@tiptap/extension-table-row":"https://esm.sh/@tiptap/extension-table-row@2.11.5",
   "@tiptap/extension-table-cell":"https://esm.sh/@tiptap/extension-table-cell@2.11.5",
@@ -343,7 +428,9 @@
 import { Editor, Node } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
+import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
+import TextAlign from '@tiptap/extension-text-align';
 import Table from '@tiptap/extension-table';
 import TableRow from '@tiptap/extension-table-row';
 import TableCell from '@tiptap/extension-table-cell';
@@ -364,6 +451,9 @@ let versionFilterText = '';
 let isNormalizingFootnotes = false;
 let lastSelectedResearchText = '';
 let lastEditSelection = null;
+let focusModeEnabled = false;
+let outlineVisible = true;
+let outlineItems = [];
 let slashState = {
   open: false,
   items: [],
@@ -421,8 +511,19 @@ const editor = new Editor({
   extensions: [
     StarterKit,
     Underline,
+    Link.configure({
+      openOnClick: false,
+      autolink: true,
+      linkOnPaste: true,
+      HTMLAttributes: {
+        class: 'editor-link',
+        rel: 'noopener noreferrer',
+        target: '_blank',
+      },
+    }),
     Superscript,
     Placeholder.configure({ placeholder: 'Start writing...' }),
+    TextAlign.configure({ types: ['heading', 'paragraph'] }),
     Table.configure({ resizable: true }),
     TableRow,
     TableHeader,
@@ -439,6 +540,190 @@ const versionsModal = document.getElementById('versions-modal');
 const footnotesModal = document.getElementById('footnotes-modal');
 const slashMenu = document.getElementById('slash-menu');
 const editorShell = document.getElementById('editor-shell');
+const blockStyleSelect = document.getElementById('block-style-select');
+const focusToggle = document.getElementById('focus-toggle');
+const outlineToggle = document.getElementById('outline-toggle');
+
+function countWords(text = '') {
+  const normalized = (text || '').trim();
+  if (!normalized) return 0;
+  return normalized.split(/\s+/).filter(Boolean).length;
+}
+
+function estimatePages(wordCount) {
+  if (!wordCount) return 0;
+  return Math.max(1, Math.ceil(wordCount / 275));
+}
+
+function normalizeLinkUrl(url) {
+  const value = (url || '').trim();
+  if (!value) return '';
+  if (/^(https?:\/\/|mailto:|tel:)/i.test(value)) return value;
+  if (value.includes('@') && !value.includes(' ')) return `mailto:${value}`;
+  return `https://${value}`;
+}
+
+function setLinkFromPrompt() {
+  const currentHref = editor.getAttributes('link').href || '';
+  const url = window.prompt('Link URL:', currentHref);
+  if (url === null) return;
+  const clean = normalizeLinkUrl(url);
+  if (!clean) {
+    editor.chain().focus().extendMarkRange('link').unsetLink().run();
+    updateToolbar();
+    return;
+  }
+  editor.chain().focus().extendMarkRange('link').setLink({ href: clean }).run();
+  updateToolbar();
+}
+
+function collectHeadings() {
+  const items = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'heading') return;
+    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    items.push({
+      id: `heading-${pos}`,
+      pos,
+      level: Math.max(1, Math.min(3, Number(node.attrs.level) || 1)),
+      text,
+    });
+  });
+  return items;
+}
+
+function getActiveOutlineItem(items = outlineItems) {
+  const currentPos = editor.state.selection.from;
+  let active = null;
+  items.forEach(item => {
+    if (item.pos <= currentPos) {
+      active = item;
+    }
+  });
+  return active;
+}
+
+function renderOutline() {
+  outlineItems = collectHeadings();
+  const listNode = document.getElementById('outline-list');
+  const summaryNode = document.getElementById('outline-summary');
+  const currentNode = document.getElementById('outline-current');
+  const activeItem = getActiveOutlineItem(outlineItems);
+
+  if (!outlineItems.length) {
+    summaryNode.textContent = 'No headings yet';
+    currentNode.textContent = 'Add headings to build a navigable outline.';
+    listNode.innerHTML = '<div class="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3 py-4 text-sm text-gray-500">Use the style menu or slash commands to add Heading 1, Heading 2, or Heading 3 blocks.</div>';
+    return;
+  }
+
+  summaryNode.textContent = `${outlineItems.length} heading${outlineItems.length === 1 ? '' : 's'}`;
+  currentNode.textContent = activeItem ? `Current section: ${activeItem.text}` : 'Use headings to jump through the draft.';
+  listNode.innerHTML = outlineItems.map(item => `
+    <button class="outline-item ${activeItem && activeItem.id === item.id ? 'outline-item-active' : ''}" data-pos="${item.pos}" style="padding-left:${0.85 + ((item.level - 1) * 0.9)}rem;">
+      <div class="outline-kicker text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-400">H${item.level}</div>
+      <div class="mt-1 text-sm font-medium leading-snug">${escapeHtml(item.text)}</div>
+      <div class="outline-meta mt-1 text-[11px] text-gray-500">${item.level === 1 ? 'Top-level section' : item.level === 2 ? 'Subsection' : 'Detail section'}</div>
+    </button>
+  `).join('');
+
+  listNode.querySelectorAll('.outline-item').forEach(btn => btn.addEventListener('click', () => {
+    const pos = Number(btn.dataset.pos);
+    if (!Number.isFinite(pos)) return;
+    editor.chain().focus(pos).run();
+    updateToolbar();
+    updateDocumentChrome();
+  }));
+}
+
+function updateOutlineActiveState() {
+  const activeItem = getActiveOutlineItem(outlineItems);
+  document.getElementById('outline-current').textContent = activeItem
+    ? `Current section: ${activeItem.text}`
+    : (outlineItems.length ? 'Use headings to jump through the draft.' : 'Add headings to build a navigable outline.');
+  document.querySelectorAll('#outline-list .outline-item').forEach(btn => {
+    btn.classList.toggle('outline-item-active', activeItem && Number(btn.dataset.pos) === activeItem.pos);
+  });
+}
+
+function getCurrentBlockStyle() {
+  if (editor.isActive('heading', { level: 1 })) return 'heading-1';
+  if (editor.isActive('heading', { level: 2 })) return 'heading-2';
+  if (editor.isActive('heading', { level: 3 })) return 'heading-3';
+  if (editor.isActive('blockquote')) return 'blockquote';
+  return 'paragraph';
+}
+
+function getCurrentTextAlign() {
+  const headingAlign = editor.isActive('heading') ? editor.getAttributes('heading').textAlign : '';
+  const paragraphAlign = editor.getAttributes('paragraph').textAlign || '';
+  return headingAlign || paragraphAlign || 'left';
+}
+
+function applyBlockStyle(value) {
+  if (value === 'paragraph') {
+    if (editor.isActive('blockquote')) {
+      editor.chain().focus().toggleBlockquote().setParagraph().run();
+    } else {
+      editor.chain().focus().setParagraph().run();
+    }
+    updateToolbar();
+    return;
+  }
+  if (value === 'blockquote') {
+    if (!editor.isActive('blockquote')) {
+      editor.chain().focus().toggleBlockquote().run();
+    }
+    updateToolbar();
+    return;
+  }
+  const level = Number((value || '').split('-')[1] || 0);
+  if (level >= 1 && level <= 3 && !editor.isActive('heading', { level })) {
+    editor.chain().focus().toggleHeading({ level }).run();
+  }
+  updateToolbar();
+}
+
+function setOutlineVisibility(visible) {
+  outlineVisible = visible;
+  editorShell.classList.toggle('outline-hidden', !visible);
+  outlineToggle.textContent = visible ? 'Hide Outline' : 'Show Outline';
+}
+
+function setFocusMode(visible) {
+  focusModeEnabled = visible;
+  document.body.classList.toggle('focus-mode', visible);
+  focusToggle.textContent = visible ? 'Exit Focus' : 'Focus';
+  if (visible) {
+    closeSidebar();
+  }
+}
+
+function updateDocumentChrome() {
+  const text = editor.getText() || '';
+  const words = countWords(text);
+  const chars = text.length;
+  const pages = estimatePages(words);
+  const headings = outlineItems.length;
+  const footnotes = collectFootnotes().length;
+  const selection = getLiveSelectionSnapshot();
+  const selectedWords = countWords(selection.text);
+  const activeItem = getActiveOutlineItem(outlineItems);
+
+  document.getElementById('doc-stats-inline').textContent = `${words} words · ${pages} est. pages`;
+  document.getElementById('doc-context-inline').textContent = selection.text
+    ? `${selectedWords} selected word${selectedWords === 1 ? '' : 's'}`
+    : (activeItem ? `Current section: ${activeItem.text}` : 'No selection');
+  document.getElementById('status-words').textContent = `${words} words`;
+  document.getElementById('status-chars').textContent = `${chars} chars`;
+  document.getElementById('status-pages').textContent = `${pages} est. pages`;
+  document.getElementById('status-headings').textContent = `${headings} heading${headings === 1 ? '' : 's'}`;
+  document.getElementById('status-footnotes').textContent = `${footnotes} footnote${footnotes === 1 ? '' : 's'}`;
+  document.getElementById('selection-stats').textContent = selection.text
+    ? `${selectedWords} word${selectedWords === 1 ? '' : 's'} selected`
+    : (activeItem ? `Current section: ${activeItem.text}` : 'Cursor at top of document');
+}
 
 async function saveContent(opts = {}) {
   if (isSaving) return;
@@ -466,6 +751,8 @@ editor.on('update', () => {
   clearTimeout(saveTimeout);
   saveStatus.textContent = 'Unsaved changes';
   saveTimeout = setTimeout(() => saveContent(), 3000);
+  renderOutline();
+  updateDocumentChrome();
   updateToolbar();
   maybeOpenSlashMenu();
   if (!footnotesModal.classList.contains('hidden')) {
@@ -494,6 +781,8 @@ editor.on('selectionUpdate', () => {
   } else if (editor.isFocused) {
     clearRememberedEditSelection();
   }
+  updateOutlineActiveState();
+  updateDocumentChrome();
   updateToolbar();
   maybeOpenSlashMenu();
   refreshResearchSelectionDisplays();
@@ -513,12 +802,19 @@ document.getElementById('doc-title').addEventListener('input', (() => {
   };
 })());
 
+blockStyleSelect.addEventListener('change', (e) => applyBlockStyle(e.target.value));
+focusToggle.addEventListener('click', () => setFocusMode(!focusModeEnabled));
+outlineToggle.addEventListener('click', () => setOutlineVisibility(!outlineVisible));
+
 document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('click', () => {
   const a = btn.dataset.action;
   if (a === 'bold') editor.chain().focus().toggleBold().run();
   if (a === 'italic') editor.chain().focus().toggleItalic().run();
   if (a === 'underline') editor.chain().focus().toggleUnderline().run();
-  if (a === 'heading') editor.chain().focus().toggleHeading({ level: parseInt(btn.dataset.level, 10) }).run();
+  if (a === 'align') editor.chain().focus().setTextAlign(btn.dataset.align).run();
+  if (a === 'setLink') setLinkFromPrompt();
+  if (a === 'unsetLink') editor.chain().focus().extendMarkRange('link').unsetLink().run();
+  if (a === 'clearFormatting') editor.chain().focus().unsetAllMarks().clearNodes().run();
   if (a === 'bulletList') editor.chain().focus().toggleBulletList().run();
   if (a === 'orderedList') editor.chain().focus().toggleOrderedList().run();
   if (a === 'blockquote') editor.chain().focus().toggleBlockquote().run();
@@ -536,17 +832,23 @@ document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('c
   if (a === 'pageBreak') editor.chain().focus().setPageBreak().run();
   if (a === 'undo') editor.chain().focus().undo().run();
   if (a === 'redo') editor.chain().focus().redo().run();
+  if (a === 'setLink' || a === 'unsetLink') {
+    updateDocumentChrome();
+  }
   updateToolbar();
 }));
 
 function updateToolbar() {
+  blockStyleSelect.value = getCurrentBlockStyle();
+  const currentAlignment = getCurrentTextAlign();
   document.querySelectorAll('.toolbar-btn').forEach(btn => {
     const a = btn.dataset.action;
     btn.classList.toggle('is-active',
       (a === 'bold' && editor.isActive('bold')) ||
       (a === 'italic' && editor.isActive('italic')) ||
       (a === 'underline' && editor.isActive('underline')) ||
-      (a === 'heading' && editor.isActive('heading', { level: parseInt(btn.dataset.level || '1', 10) })) ||
+      (a === 'align' && currentAlignment === btn.dataset.align) ||
+      (a === 'setLink' && editor.isActive('link')) ||
       (a === 'bulletList' && editor.isActive('bulletList')) ||
       (a === 'orderedList' && editor.isActive('orderedList')) ||
       (a === 'blockquote' && editor.isActive('blockquote')) ||
@@ -695,6 +997,9 @@ function pendingRunStatusText(run) {
 }
 
 function openSidebar() {
+  if (focusModeEnabled) {
+    setFocusMode(false);
+  }
   editorShell.classList.add('research-open');
   refreshResearchSelectionDisplays();
   if (!agentSessionLoaded) {
@@ -2337,10 +2642,14 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     hideSlashMenu();
   }
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
     e.preventDefault();
     clearTimeout(saveTimeout);
     saveContent({ forceSnapshot: false });
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && editor.isFocused) {
+    e.preventDefault();
+    setLinkFromPrompt();
   }
 });
 window.addEventListener('beforeunload', () => {
@@ -2652,6 +2961,13 @@ const slashCommands = [
     run: () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
   },
   {
+    id: 'link',
+    title: 'Insert Link',
+    description: 'Attach a URL to the current selection',
+    keywords: ['link', 'url', 'website', 'source'],
+    run: () => setLinkFromPrompt(),
+  },
+  {
     id: 'blockquote',
     title: 'Insert Block Quote',
     description: 'Toggle block quote for selected text',
@@ -2740,6 +3056,7 @@ async function executeSlashCommand(index) {
     editor.chain().focus().deleteRange(range).run();
   }
   await Promise.resolve(cmd.run());
+  updateDocumentChrome();
   updateToolbar();
 }
 
@@ -2779,6 +3096,9 @@ document.addEventListener('click', (e) => {
 
 setTab('chat');
 normalizeFootnotes();
+setOutlineVisibility(true);
+renderOutline();
+updateDocumentChrome();
 updateToolbar();
 </script>
 {% endblock %}
