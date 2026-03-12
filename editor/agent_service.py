@@ -12,6 +12,7 @@ from .document_text import clip_document_text, extract_plain_text
 from .document_file_service import rank_client_files
 from .exemplar_service import rank_exemplars
 from .models import DocumentClientFile, DocumentResearchRun, Exemplar
+from .openai_file_service import analyze_client_file_with_input_file, search_indexed_client_files
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +151,12 @@ You work alongside the attorney inside a live drafting session.
 Research operating rules:
 1. Use the BIA Edge database tools first for legal authorities, holdings, statutes, regulations, policy sections, and validity checks.
 2. Use the knowledge-base tools for firm exemplars, prior briefs, and internal language only when the user is asking about internal style, phrasing, formatting, or prior work product.
-3. Use the document client-file tools when factual support, biographical detail, chronology, exhibits, or source language from uploaded client documents would help answer the question.
+3. Use the document client-file tools when factual support, biographical detail, chronology, exhibits, or source language from uploaded client documents would help answer the question. Start with search_client_documents, use get_client_document for extracted text, and use analyze_client_document when a file looks image-based or the extracted text is thin.
 4. Use web search only when freshness matters, when the user explicitly asks for it, or when database tools do not answer the question.
 5. Do not invent citations, case names, statutes, regulations, policy sections, quoted passages, or facts from uploaded client files.
 6. Prefer precedential authorities in your legal analysis. If you mention unpublished decisions or non-precedential material, label that clearly.
 7. If the user asks you to search the database, actually use the database tools instead of answering from memory.
-8. If you rely on uploaded client documents for a factual statement or quote, retrieve the relevant client file first.
+8. If you rely on uploaded client documents for a factual statement or quote, retrieve the relevant client file first. If the extracted text appears incomplete, analyze the original file before quoting it.
 9. If controlling authority is thin or uncertain, say so directly.
 10. Research efficiently. Start with targeted searches, then inspect only the strongest authorities you need.
 11. Use search_client_documents or search_exemplars first, then retrieve only the one or two files you actually need.
@@ -177,7 +178,7 @@ Your task is to suggest the best legal authorities for the user's selected passa
 Hard rules:
 1. Final suggested authorities must be verified through BIA Edge database tools.
 2. Prefer precedential cases, statutes, regulations, and published policy.
-3. Use uploaded client-document tools, web search, or knowledge tools only for context; do not include web-only authorities in the final authority list.
+3. Use uploaded client-document tools, web search, or knowledge tools only for context; do not include web-only authorities in the final authority list. Use analyze_client_document when an uploaded file appears image-based or the extracted text is incomplete.
 4. Do not invent any citation, holding, proposition, or fact from uploaded client documents.
 5. If the selected text is vague or under-supported, explain the gap instead of bluffing.
 6. Return valid JSON only. No markdown fences, no prose outside the JSON object.
@@ -215,7 +216,7 @@ You work inside a live draft and may research before proposing a controlled edit
 
 Hard rules:
 1. Read the current document context and any selected text before proposing an edit.
-2. Use BIA Edge first for legal authorities. Use knowledge tools for internal style and prior work product. Use document client-file tools for uploaded factual materials. Use web search only when freshness matters or the user explicitly asks for it.
+2. Use BIA Edge first for legal authorities. Use knowledge tools for internal style and prior work product. Use document client-file tools for uploaded factual materials. Use analyze_client_document when an uploaded file appears image-based or the extracted text is incomplete. Use web search only when freshness matters or the user explicitly asks for it.
 3. Do not invent citations, quoted language, legal standards, case support, or facts from uploaded client documents.
 4. Propose one concrete edit only. Do not rewrite the whole document unless the user explicitly asks for that and the operation is append_to_document.
 5. The final answer must be valid JSON only. No markdown fences and no prose outside the JSON object.
@@ -546,20 +547,32 @@ def _get_exemplar_for_agent(*, user, exemplar_id: int):
 def _search_client_files_for_agent(*, document, query: str, limit: int = 5):
     normalized_query = (query or "").strip()
     normalized_limit = max(1, min(int(limit or 5), 8))
+    indexed_results = search_indexed_client_files(
+        document=document,
+        query=normalized_query,
+        limit=normalized_limit,
+    )
+    if indexed_results:
+        return {"results": indexed_results}
 
     items = []
     for client_file in document.client_files.all()[:200]:
         text = client_file.extracted_text or ""
+        metadata = client_file.metadata or {}
         items.append(
             {
                 "id": client_file.id,
                 "title": client_file.title,
-                "filename": (client_file.metadata or {}).get("filename") or "",
-                "extension": (client_file.metadata or {}).get("extension") or "",
+                "filename": metadata.get("filename") or "",
+                "extension": metadata.get("extension") or "",
                 "updated_at": client_file.updated_at.isoformat(),
                 "snippet": text[:500],
                 "extracted_text": text[:5000],
                 "embedding": client_file.embedding or [],
+                "text_extracted": bool(metadata.get("text_extracted")),
+                "scan_candidate": bool(metadata.get("scan_candidate")),
+                "openai_index_status": str(metadata.get("openai_index_status") or "").strip(),
+                "retrieval_source": "local_excerpt",
             }
         )
 
@@ -573,6 +586,10 @@ def _search_client_files_for_agent(*, document, query: str, limit: int = 5):
                 "extension": item["extension"],
                 "snippet": item["snippet"],
                 "score": round(float(item.get("score", 0.0) or 0.0), 4),
+                "text_extracted": bool(item.get("text_extracted")),
+                "scan_candidate": bool(item.get("scan_candidate")),
+                "openai_index_status": str(item.get("openai_index_status") or "").strip(),
+                "retrieval_source": item.get("retrieval_source") or "local_excerpt",
             }
             for item in ranked[:normalized_limit]
         ]
@@ -593,6 +610,7 @@ def _get_client_file_for_agent(*, document, file_id: int):
         "filename": (client_file.metadata or {}).get("filename") or "",
         "extension": (client_file.metadata or {}).get("extension") or "",
         "metadata": client_file.metadata or {},
+        "text_warning": str((client_file.metadata or {}).get("warning") or "").strip(),
         "text": clip_document_text(
             client_file.extracted_text or "",
             max_chars=_LOCAL_TOOL_TEXT_MAX_CHARS,
@@ -674,7 +692,7 @@ def _client_file_function_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "get_client_document",
-            "description": "Fetch the extracted text and metadata for a specific uploaded client document attached to the current draft.",
+            "description": "Fetch the extracted text and metadata for a specific uploaded client document attached to the current draft. If the extracted text is incomplete or empty, follow up with analyze_client_document.",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -686,6 +704,27 @@ def _client_file_function_tools() -> list[dict[str, Any]]:
                     }
                 },
                 "required": ["file_id"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "analyze_client_document",
+            "description": "Read the original uploaded client document directly with OpenAI file input when the file appears image-based, the extracted text is thin, or layout/page details matter.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_id": {
+                        "type": "integer",
+                        "description": "The client document ID returned by search_client_documents.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "What to inspect or extract from the original uploaded file.",
+                    },
+                },
+                "required": ["file_id", "query"],
             },
         },
     ]
@@ -1271,6 +1310,12 @@ _EDIT_OPERATIONS = {
     "append_to_document",
     "delete_selection",
 }
+_WORD_LEVEL_EDIT_RE = re.compile(
+    r"\b(word|phrase|sentence|typo|spelling|grammar|punctuation|citation|quote)\b"
+)
+_STRUCTURAL_EDIT_RE = re.compile(
+    r"\b(section|paragraph|introduction|conclusion|cover letter|draft|add|insert|below|under|after|before)\b"
+)
 
 _EDIT_FALLBACK_SECTION_LABELS = {
     "edit summary": "edit_summary",
@@ -1309,13 +1354,45 @@ def _normalize_edit_operation(value: Any, *, has_selected_text: bool, has_target
     return operation
 
 
+def _normalize_edit_text_block(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if any(token in normalized for token in ["\\r\\n", "\\n", "\\t", '\\"']):
+        normalized = (
+            normalized.replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+        )
+    return normalized.strip()
+
+
+def _should_ignore_selected_text_for_instruction(*, selected_text: str, instruction: str) -> bool:
+    normalized_selected = str(selected_text or "").strip()
+    normalized_instruction = " ".join(str(instruction or "").lower().split())
+    if not normalized_selected or not normalized_instruction:
+        return False
+
+    word_count = len(re.findall(r"\S+", normalized_selected))
+    char_count = len(normalized_selected)
+    tiny_selection = char_count <= 3 or (word_count <= 1 and char_count <= 12)
+    if not tiny_selection:
+        return False
+    if _WORD_LEVEL_EDIT_RE.search(normalized_instruction):
+        return False
+    return bool(_STRUCTURAL_EDIT_RE.search(normalized_instruction))
+
+
 def _normalize_edit_result(payload: Any, *, request_payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
     selected_text = str(request_payload.get("selected_text") or "").strip()
     has_selected_text = bool(selected_text)
-    target_text = str(payload.get("target_text") or selected_text).strip()
+    target_text = _normalize_edit_text_block(payload.get("target_text") or selected_text)
     has_target_text = bool(target_text)
     operation = _normalize_edit_operation(
         payload.get("operation"),
@@ -1327,12 +1404,12 @@ def _normalize_edit_result(payload: Any, *, request_payload: dict[str, Any]) -> 
         "rationale": str(payload.get("rationale") or "").strip(),
         "operation": operation,
         "target_text": target_text,
-        "proposed_text": str(
+        "proposed_text": _normalize_edit_text_block(
             payload.get("proposed_text")
             or payload.get("replacement_text")
             or payload.get("text")
             or ""
-        ).strip(),
+        ),
         "notes": str(payload.get("notes") or payload.get("search_notes") or "").strip(),
         "selected_text": selected_text,
         "selection_from": _coerce_int(request_payload.get("selection_from")),
@@ -1598,6 +1675,14 @@ class DocumentResearchAgent:
             raise AgentExecutionError("An edit instruction is required.")
 
         normalized_selected = (selected_text or "").strip()
+        selection_ignored = _should_ignore_selected_text_for_instruction(
+            selected_text=normalized_selected,
+            instruction=normalized_instruction,
+        )
+        if selection_ignored:
+            normalized_selected = ""
+            selection_from = None
+            selection_to = None
         run.mode = "edit"
         run.request_payload = {
             "instruction": normalized_instruction,
@@ -1608,6 +1693,9 @@ class DocumentResearchAgent:
         run.previous_response_id = ""
         run.metadata = self._initial_run_metadata(mode="edit", previous_response_id="")
         metadata = dict(run.metadata or {})
+        if selection_ignored:
+            metadata["selection_ignored"] = True
+            metadata["selection_ignored_reason"] = "ignored_micro_selection_for_structural_edit"
         metadata["requirements"] = _make_turn_requirements(
             mode="edit",
             request_text=normalized_instruction,
@@ -2488,7 +2576,7 @@ class DocumentResearchAgent:
                 )
                 tool_name = getattr(call, "name", "") or ""
                 tool_source = "knowledge"
-                if tool_name in {"search_client_documents", "get_client_document"}:
+                if tool_name in {"search_client_documents", "get_client_document", "analyze_client_document"}:
                     tool_source = "client_docs"
                 record = {
                     "source": tool_source,
@@ -3051,6 +3139,17 @@ class DocumentResearchAgent:
                 document=self.document,
                 file_id=_coerce_int(arguments.get("file_id")) or 0,
             )
+        if name == "analyze_client_document":
+            client_file = DocumentClientFile.objects.filter(
+                document=self.document,
+                id=_coerce_int(arguments.get("file_id")) or 0,
+            ).first()
+            if not client_file:
+                return {"error": "Client document not found."}
+            return analyze_client_file_with_input_file(
+                client_file,
+                query=str(arguments.get("query") or ""),
+            )
         if name == "search_exemplars":
             return _search_exemplars_for_agent(
                 user=self.user,
@@ -3147,19 +3246,25 @@ class DocumentResearchAgent:
                 for call in function_calls:
                     raw_arguments = getattr(call, "arguments", "") or ""
                     parsed_arguments = _safe_json_loads(raw_arguments, default={}) or {}
+                    tool_name = getattr(call, "name", "") or ""
+                    tool_source = "knowledge"
+                    if tool_name in {"search_client_documents", "get_client_document", "analyze_client_document"}:
+                        tool_source = "client_docs"
                     result = self._call_local_tool(
-                        name=getattr(call, "name", "") or "",
+                        name=tool_name,
                         arguments=parsed_arguments,
                     )
-                    tool_calls.append(
-                        {
-                            "source": "knowledge",
-                            "type": "function_call",
-                            "name": getattr(call, "name", "") or "",
-                            "status": "completed",
-                            "arguments": parsed_arguments,
-                        }
-                    )
+                    record = {
+                        "source": tool_source,
+                        "type": "function_call",
+                        "name": tool_name,
+                        "status": "completed",
+                        "arguments": parsed_arguments,
+                    }
+                    output_excerpt = _compact_tool_output(result)
+                    if output_excerpt:
+                        record["output_excerpt"] = output_excerpt
+                    tool_calls.append(record)
                     outputs.append(
                         {
                             "type": "function_call_output",

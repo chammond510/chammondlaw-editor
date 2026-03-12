@@ -18,6 +18,7 @@ from .agent_service import (
     AGENT_FINALIZATION_REASONING_EFFORT,
     AgentConfigurationError,
     DocumentResearchAgent,
+    _search_client_files_for_agent,
     _client_file_function_tools,
     _extract_json_object,
     _extract_output_text,
@@ -39,6 +40,7 @@ from .models import (
     DocumentVersion,
     DocumentType,
 )
+from .openai_file_service import analyze_client_file_with_input_file, sync_client_file_openai_index
 
 
 def _sample_tiptap(text):
@@ -599,6 +601,41 @@ class AgentResearchViewsTests(TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Police Report")
 
+    @patch("editor.document_file_views.sync_client_file_openai_index")
+    @patch("editor.document_file_views.extract_text_from_file")
+    def test_client_document_upload_marks_scanned_pdf_as_openai_analysis_ready(self, extract_text, sync_index):
+        extract_text.return_value = ""
+
+        def fake_sync_index(client_file):
+            return {
+                **(client_file.metadata or {}),
+                "char_count": 0,
+                "text_extracted": False,
+                "scan_candidate": True,
+                "openai_index_status": "completed",
+                "openai_file_id": "file_client_scan",
+                "openai_vector_store_id": "vs_client_scan",
+                "openai_vector_store_file_id": "vsfile_client_scan",
+            }
+
+        sync_index.side_effect = fake_sync_index
+        upload = SimpleUploadedFile(
+            "cbp-scan.pdf",
+            b"%PDF-1.4 fake",
+            content_type="application/pdf",
+        )
+
+        response = self.client.post(
+            reverse("document_client_file_upload", kwargs={"doc_id": self.document.id}),
+            data={"file": upload, "title": "CBP Scan"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["client_file"]
+        self.assertEqual(payload["metadata"]["openai_index_status"], "completed")
+        self.assertTrue(payload["metadata"]["scan_candidate"])
+        self.assertIn("OpenAI document analysis", payload["metadata"]["warning"])
+
 
 class EditorViewTests(TestCase):
     def setUp(self):
@@ -705,6 +742,15 @@ class AgentServiceTests(TestCase):
             sorted(client_doc_schema["properties"].keys()),
             sorted(client_doc_schema["required"]),
         )
+        analyze_schema = {
+            tool["name"]: tool
+            for tool in _client_file_function_tools()
+        }["analyze_client_document"]["parameters"]
+        self.assertEqual(analyze_schema["required"], ["file_id", "query"])
+        self.assertEqual(
+            sorted(analyze_schema["properties"].keys()),
+            sorted(analyze_schema["required"]),
+        )
 
     @patch("editor.agent_service._new_openai_client")
     def test_build_tools_omits_knowledge_functions_without_active_exemplars(self, new_client):
@@ -747,8 +793,82 @@ class AgentServiceTests(TestCase):
         tools = agent._build_tools(mode="chat", include_mcp=False)
         function_names = sorted(tool.get("name") for tool in tools if tool.get("type") == "function")
 
+        self.assertIn("analyze_client_document", function_names)
         self.assertIn("search_client_documents", function_names)
         self.assertIn("get_client_document", function_names)
+
+    @patch("editor.agent_service.search_indexed_client_files")
+    def test_search_client_documents_prefers_indexed_openai_results_when_available(self, search_indexed):
+        client_file = DocumentClientFile.objects.create(
+            document=self.document,
+            title="CBP Inspection Record",
+            original_file=SimpleUploadedFile("inspection.pdf", b"PDF bytes"),
+            extracted_text="",
+            uploaded_by=self.user,
+            metadata={
+                "filename": "inspection.pdf",
+                "extension": ".pdf",
+                "text_extracted": False,
+                "scan_candidate": True,
+                "openai_index_status": "completed",
+            },
+        )
+        search_indexed.return_value = [
+            {
+                "id": client_file.id,
+                "title": client_file.title,
+                "filename": "inspection.pdf",
+                "extension": ".pdf",
+                "snippet": "The I-94 reflects admission on March 1, 2024.",
+                "score": 0.9132,
+                "text_extracted": False,
+                "scan_candidate": True,
+                "openai_index_status": "completed",
+                "retrieval_source": "openai_vector_store",
+            }
+        ]
+
+        result = _search_client_files_for_agent(
+            document=self.document,
+            query="inspection admission",
+            limit=5,
+        )
+
+        self.assertEqual(result["results"][0]["id"], client_file.id)
+        self.assertEqual(result["results"][0]["retrieval_source"], "openai_vector_store")
+        search_indexed.assert_called_once_with(
+            document=self.document,
+            query="inspection admission",
+            limit=5,
+        )
+
+    @patch("editor.agent_service.analyze_client_file_with_input_file")
+    @patch("editor.agent_service._new_openai_client")
+    def test_call_local_tool_can_analyze_original_client_document(self, new_client, analyze_client_file):
+        client_file = DocumentClientFile.objects.create(
+            document=self.document,
+            title="Visa Stamp",
+            original_file=SimpleUploadedFile("visa-stamp.pdf", b"PDF bytes"),
+            extracted_text="",
+            uploaded_by=self.user,
+            metadata={"filename": "visa-stamp.pdf", "extension": ".pdf"},
+        )
+        analyze_client_file.return_value = {
+            "id": client_file.id,
+            "analysis": "The visa foil shows an F-1 classification issued in 2021.",
+        }
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+
+        result = agent._call_local_tool(
+            name="analyze_client_document",
+            arguments={"file_id": client_file.id, "query": "What does the visa foil show?"},
+        )
+
+        self.assertEqual(result["analysis"], "The visa foil shows an F-1 classification issued in 2021.")
+        analyze_client_file.assert_called_once()
 
     @patch("editor.agent_service._new_openai_client")
     def test_local_function_budget_forces_final_response_instead_of_failing(self, new_client):
@@ -1119,6 +1239,22 @@ class AgentServiceTests(TestCase):
         self.assertEqual(normalized["operation"], "replace_selection")
         self.assertEqual(normalized["target_text"], "Original introduction paragraph.")
 
+    def test_normalize_edit_result_unescapes_double_escaped_newlines(self):
+        normalized = _normalize_edit_result(
+            {
+                "edit_summary": "Draft sections A and B",
+                "operation": "insert_after_selection",
+                "target_text": "B. Eligibility and Procedural Posture",
+                "proposed_text": "A. Case Summary\\nThis filing submits Form I-485.\\n\\nB. Eligibility and Procedural Posture\\nThe applicant seeks adjustment of status.",
+            },
+            request_payload={"selected_text": ""},
+        )
+
+        self.assertEqual(
+            normalized["proposed_text"],
+            "A. Case Summary\nThis filing submits Form I-485.\n\nB. Eligibility and Procedural Posture\nThe applicant seeks adjustment of status.",
+        )
+
     def test_extract_json_object_allows_control_characters_inside_strings(self):
         raw = (
             '{"edit_summary":"Replace the argument section.",'
@@ -1210,6 +1346,67 @@ class AgentServiceTests(TestCase):
         )
 
         self.assertEqual(normalized["operation"], "replace_selection")
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_start_edit_run_ignores_micro_selection_for_structural_request(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="queued",
+            stage="queued",
+        )
+        queued_response = SimpleNamespace(id="resp_edit_start", status="queued", error=None, usage=None, output=[])
+
+        with patch.object(agent, "_build_tools", return_value=[]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response) as create_background:
+                updated = agent.start_edit_run(
+                    run=run,
+                    instruction="Look at the uploaded documents and draft section A and B of this cover letter.",
+                    selected_text="e",
+                    selection_from=210,
+                    selection_to=211,
+                )
+
+        self.assertEqual(updated.request_payload["selected_text"], "")
+        self.assertIsNone(updated.request_payload["selection_from"])
+        self.assertIsNone(updated.request_payload["selection_to"])
+        self.assertTrue(updated.metadata.get("selection_ignored"))
+        request = create_background.call_args.kwargs
+        self.assertIn("No text is currently selected.", request["input_payload"])
+
+    @patch("editor.agent_service._new_openai_client")
+    def test_start_edit_run_keeps_micro_selection_for_word_level_request(self, new_client):
+        agent = DocumentResearchAgent(
+            document=self.document,
+            user=self.user,
+        )
+        session = DocumentResearchSession.objects.create(document=self.document, user=self.user)
+        run = DocumentResearchRun.objects.create(
+            session=session,
+            mode="edit",
+            status="queued",
+            stage="queued",
+        )
+        queued_response = SimpleNamespace(id="resp_edit_word", status="queued", error=None, usage=None, output=[])
+
+        with patch.object(agent, "_build_tools", return_value=[]):
+            with patch.object(agent, "_create_background_response", return_value=queued_response):
+                updated = agent.start_edit_run(
+                    run=run,
+                    instruction="Fix the spelling of this word.",
+                    selected_text="teh",
+                    selection_from=42,
+                    selection_to=45,
+                )
+
+        self.assertEqual(updated.request_payload["selected_text"], "teh")
+        self.assertEqual(updated.request_payload["selection_from"], 42)
+        self.assertEqual(updated.request_payload["selection_to"], 45)
 
     def test_normalize_mcp_server_url_adds_scheme_and_default_path(self):
         self.assertEqual(
@@ -1565,6 +1762,91 @@ class AgentServiceTests(TestCase):
         self.assertEqual(request["instructions"], agent._run_instructions(run))
         self.assertIn("Turn requirements JSON:", request["input_payload"])
         self.assertIn("missing_full_text_sources: policy, case_law", request["input_payload"])
+
+
+class OpenAIClientFileServiceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="openai-file-user", password="secret")
+        self.document_type = DocumentType.objects.create(
+            name="OpenAI File Cover Letter",
+            slug="openai-file-cover-letter",
+            category="cover_letter",
+            template_content=_sample_tiptap("Template"),
+        )
+        self.document = Document.objects.create(
+            title="OpenAI File Document",
+            document_type=self.document_type,
+            content=_sample_tiptap("Draft"),
+            created_by=self.user,
+        )
+
+    def test_sync_client_file_openai_index_uploads_and_indexes_file(self):
+        client = SimpleNamespace(
+            files=SimpleNamespace(create=lambda **kwargs: SimpleNamespace(id="file_upload_123")),
+            vector_stores=SimpleNamespace(
+                create=lambda **kwargs: SimpleNamespace(id="vs_client_docs_123"),
+                files=SimpleNamespace(
+                    create_and_poll=lambda **kwargs: SimpleNamespace(
+                        id="vsfile_client_docs_123",
+                        status="completed",
+                    )
+                ),
+            ),
+        )
+        client_file = DocumentClientFile.objects.create(
+            document=self.document,
+            title="Scanned I-94",
+            original_file=SimpleUploadedFile("i94-scan.pdf", b"%PDF-1.4 fake"),
+            extracted_text="",
+            uploaded_by=self.user,
+            metadata={"filename": "i94-scan.pdf", "extension": ".pdf", "text_extracted": False},
+        )
+
+        metadata = sync_client_file_openai_index(client_file, client=client)
+
+        client_file.refresh_from_db()
+        self.assertEqual(metadata["openai_file_id"], "file_upload_123")
+        self.assertEqual(metadata["openai_vector_store_id"], "vs_client_docs_123")
+        self.assertEqual(metadata["openai_vector_store_file_id"], "vsfile_client_docs_123")
+        self.assertEqual(metadata["openai_index_status"], "completed")
+        self.assertTrue(metadata["scan_candidate"])
+        self.assertEqual(client_file.metadata["openai_file_id"], "file_upload_123")
+
+    def test_analyze_client_file_with_input_file_sends_original_file_to_responses_api(self):
+        recorded_request = {}
+
+        def fake_create(**kwargs):
+            recorded_request.update(kwargs)
+            return SimpleNamespace(output_text="The I-94 shows admission on March 1, 2024.", output=[])
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=fake_create),
+        )
+        client_file = DocumentClientFile.objects.create(
+            document=self.document,
+            title="I-94 Record",
+            original_file=SimpleUploadedFile("i94-record.pdf", b"%PDF-1.4 fake"),
+            extracted_text="",
+            uploaded_by=self.user,
+            metadata={
+                "filename": "i94-record.pdf",
+                "extension": ".pdf",
+                "openai_file_id": "file_i94_123",
+            },
+        )
+
+        result = analyze_client_file_with_input_file(
+            client_file,
+            query="What admission date appears on the I-94?",
+            client=client,
+        )
+
+        self.assertEqual(result["analysis"], "The I-94 shows admission on March 1, 2024.")
+        self.assertEqual(recorded_request["model"], "gpt-5.4")
+        self.assertEqual(recorded_request["tool_choice"], "none")
+        self.assertEqual(recorded_request["input"][0]["content"][0]["type"], "input_text")
+        self.assertEqual(recorded_request["input"][0]["content"][1]["type"], "input_file")
+        self.assertEqual(recorded_request["input"][0]["content"][1]["file_id"], "file_i94_123")
 
 
 class DocumentImportTests(TestCase):

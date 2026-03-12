@@ -1075,6 +1075,22 @@ function getPreferredEditSelectionSnapshot() {
   return getRememberedEditSelection();
 }
 
+function shouldIgnoreEditSelectionForInstruction(selectionText, instruction) {
+  const selected = String(selectionText || '').trim();
+  const normalizedInstruction = String(instruction || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!selected || !normalizedInstruction) return false;
+
+  const wordCount = selected.split(/\s+/).filter(Boolean).length;
+  const charCount = selected.length;
+  const tinySelection = charCount <= 3 || (wordCount <= 1 && charCount <= 12);
+  if (!tinySelection) return false;
+
+  const wordLevelRequest = /\b(word|phrase|sentence|typo|spelling|grammar|punctuation|citation|quote)\b/.test(normalizedInstruction);
+  if (wordLevelRequest) return false;
+
+  return /\b(section|paragraph|introduction|conclusion|cover letter|draft|add|insert|below|under|after|before)\b/.test(normalizedInstruction);
+}
+
 function insertCitation(item) {
   const date = item.decision_date || item.date || null;
   const year = date ? new Date(date).getUTCFullYear() : '';
@@ -1803,6 +1819,22 @@ function effectiveEditOperation(result) {
   return operation;
 }
 
+function isSuspiciousTargetedStructuralEdit(result) {
+  if (!result) return false;
+  const operation = effectiveEditOperation(result);
+  if (operation === 'append_to_document' || operation === 'delete_selection') return false;
+
+  const targetText = String(result.selected_text || result.target_text || '').trim();
+  if (!targetText) return false;
+
+  const targetWords = targetText.split(/\s+/).filter(Boolean).length;
+  const tinyTarget = targetText.length <= 3 || (targetWords <= 1 && targetText.length <= 12);
+  if (!tinyTarget) return false;
+
+  const proposedText = String(result.proposed_text || '').trim();
+  return proposedText.length >= 120 || /\n\s*\n/.test(proposedText);
+}
+
 function paragraphNodeFromText(block) {
   const lines = String(block || '').split('\n');
   const content = [];
@@ -1907,6 +1939,9 @@ function applyEditOperationLocally(result) {
   const operation = effectiveEditOperation(result);
   let applied = false;
   try {
+    if (isSuspiciousTargetedStructuralEdit(result)) {
+      throw new Error('This proposal is anchored to a tiny target but inserts a large block of text. Re-run it with a full heading or paragraph target before applying.');
+    }
     if (operation === 'append_to_document') {
       editor.chain().focus(editor.state.doc.content.size).insertContent(
         tiptapNodesFromPlainText(result.proposed_text || '')
@@ -2001,6 +2036,9 @@ function renderEditResponse(result) {
   const sourceSummary = toolSourceSummary(result.tool_calls || []);
   const operation = effectiveEditOperation(result);
   const targetLabel = result.selected_text ? 'Current selection' : (targetText ? 'Matched document text' : 'Document end');
+  const suspiciousTargetWarning = isSuspiciousTargetedStructuralEdit(result)
+    ? '<div class="text-[11px] text-amber-700">This proposal is anchored to a very small target. Review or regenerate it before applying.</div>'
+    : '';
   const reviewNote = result.applied_at
     ? 'This reviewed edit has already been applied to the draft.'
     : 'Review this working-copy change below. Nothing is written into the draft until you click Apply to Draft.';
@@ -2020,6 +2058,7 @@ function renderEditResponse(result) {
       </div>
       ${result.rationale ? `<div class="text-xs text-gray-700"><span class="font-semibold">Why:</span> ${escapeHtml(result.rationale)}</div>` : ''}
       <div class="rounded border bg-gray-50 p-2 text-[11px] text-gray-600">${escapeHtml(reviewNote)}</div>
+      ${suspiciousTargetWarning}
       <div class="grid gap-3 md:grid-cols-2">
         <div class="text-xs text-gray-700">
           <span class="font-semibold">${escapeHtml(targetLabel)}:</span>
@@ -2115,8 +2154,16 @@ async function runAgentEdit() {
     return;
   }
 
-  const selection = getPreferredEditSelectionSnapshot();
-  renderEditPending('Reviewing the draft and drafting the proposed edit...');
+  const preferredSelection = getPreferredEditSelectionSnapshot();
+  const ignoreSelection = shouldIgnoreEditSelectionForInstruction(preferredSelection.text, instruction);
+  const selection = ignoreSelection
+    ? { from: null, to: null, text: '' }
+    : preferredSelection;
+  renderEditPending(
+    ignoreSelection
+      ? 'Reviewing the draft and drafting the proposed edit without the tiny remembered selection...'
+      : 'Reviewing the draft and drafting the proposed edit...'
+  );
 
   try {
     const res = await fetch(`/api/research/agent/edit/${docId}/`, {

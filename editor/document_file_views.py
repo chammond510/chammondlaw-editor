@@ -8,6 +8,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .document_file_service import rank_client_files, serialize_client_file
 from .exemplar_service import extract_text_from_file, generate_embedding
 from .models import Document, DocumentClientFile
+from .openai_file_service import build_client_file_warning, sync_client_file_openai_index
 
 
 _ALLOWED_CLIENT_FILE_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".rtf"}
@@ -53,12 +54,20 @@ def client_file_upload(request, doc_id):
     metadata = dict(client_file.metadata or {})
     metadata["char_count"] = len(extracted_text)
     metadata["text_extracted"] = bool(extracted_text.strip())
-    if not extracted_text.strip():
-        metadata["warning"] = "No extractable text was found in this file."
     client_file.extracted_text = extracted_text
     client_file.embedding = embedding
     client_file.metadata = metadata
     client_file.save(update_fields=["extracted_text", "embedding", "metadata", "updated_at"])
+
+    metadata = sync_client_file_openai_index(client_file)
+    warning = build_client_file_warning(metadata)
+    if warning:
+        metadata["warning"] = warning
+    else:
+        metadata.pop("warning", None)
+    if metadata != (client_file.metadata or {}):
+        client_file.metadata = metadata
+        client_file.save(update_fields=["metadata", "updated_at"])
 
     return JsonResponse({"client_file": _serialize_client_file_detail(client_file)})
 
