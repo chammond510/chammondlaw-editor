@@ -43,7 +43,7 @@ from .models import (
     Exemplar,
 )
 from .openai_file_service import analyze_client_file_with_input_file, sync_client_file_openai_index
-from .proof_service import ProofRenderError, SofficeRenderBackend
+from .proof_service import ProofRenderError, SofficeRenderBackend, render_document_proof
 
 
 def _sample_tiptap(text):
@@ -2091,6 +2091,41 @@ class ProofRenderBackendTests(TestCase):
 
         self.assertEqual(backend.binary, str(binary_path))
         self.assertTrue(backend.is_available())
+
+    @patch("editor.proof_service._build_pdf_preview_assets", return_value=(1, []))
+    @patch("editor.proof_service.tiptap_to_pdf")
+    @patch("editor.proof_service.WordRenderService.render_docx_to_pdf")
+    def test_render_document_proof_falls_back_to_internal_pdf_when_word_rendering_is_unavailable(
+        self,
+        render_docx_to_pdf,
+        tiptap_to_pdf_mock,
+        _build_pdf_preview_assets,
+    ):
+        render_docx_to_pdf.side_effect = ProofRenderError("No proof render backend is available.")
+        tiptap_to_pdf_mock.return_value = BytesIO(b"%PDF-1.4 fallback")
+        user = User.objects.create_user(username="proof-fallback-user", password="secret")
+        document_type = DocumentType.objects.create(
+            name="Fallback Brief",
+            slug="fallback-brief",
+            category="brief",
+            export_format="court_brief",
+            template_content=_sample_tiptap("Template"),
+        )
+        document = Document.objects.create(
+            title="Fallback Draft",
+            document_type=document_type,
+            content=_sample_tiptap("Fallback proof content."),
+            created_by=user,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with override_settings(MEDIA_ROOT=tmpdir):
+                manifest = render_document_proof(document, user=user, force=True)
+
+        self.assertEqual(manifest["backend"], "internal_pdf")
+        self.assertFalse(manifest["exact_render"])
+        self.assertIn("internal PDF export", manifest["notice"])
+        self.assertEqual(manifest["page_count"], 1)
 
 
 class ExemplarWorkflowTests(TestCase):

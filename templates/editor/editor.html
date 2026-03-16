@@ -993,12 +993,15 @@ function updateZoomLabel() {
 }
 
 function renderProofFallbackImages(manifest) {
+  const noticeMarkup = manifest && manifest.notice
+    ? `<div class="mx-auto mb-4 max-w-[900px] rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">${escapeHtml(manifest.notice)}</div>`
+    : '';
   proofPreviewNode.innerHTML = (manifest.pages || []).length
-    ? (manifest.pages || []).map(page => `
+    ? `${noticeMarkup}${(manifest.pages || []).map(page => `
         <div class="proof-preview-page" style="transform: scale(${proofZoom}); transform-origin: top center;">
           <img class="proof-preview-image" src="${page.image_url}" alt="Preview page ${page.index}">
         </div>
-      `).join('')
+      `).join('')}`
     : '<div class="proof-empty">No proof preview pages were generated.</div>';
 }
 
@@ -1011,6 +1014,12 @@ async function renderProofManifest(manifest) {
   try {
     const pdf = await pdfjsLib.getDocument(manifest.pdf_url).promise;
     proofPreviewNode.innerHTML = '';
+    if (manifest.notice) {
+      const notice = document.createElement('div');
+      notice.className = 'mx-auto mb-4 max-w-[900px] rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900';
+      notice.textContent = manifest.notice;
+      proofPreviewNode.appendChild(notice);
+    }
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 1.15 * proofZoom });
@@ -1077,7 +1086,8 @@ async function refreshProofManifest(force = true) {
       page_count: data.page_count,
       generated_at: data.generated_at,
     };
-    setProofStatus(`Preview ready • ${data.page_count || 0} page${data.page_count === 1 ? '' : 's'} • ${data.backend || 'renderer'}`, 'success');
+    const previewLabel = data.exact_render === false ? 'Fallback preview' : 'Preview ready';
+    setProofStatus(`${previewLabel} • ${data.page_count || 0} page${data.page_count === 1 ? '' : 's'} • ${data.backend || 'renderer'}`, data.exact_render === false ? 'neutral' : 'success');
     await renderProofManifest(data);
   } catch (error) {
     setProofStatus(error?.message || 'Unable to generate the proof preview.', 'error');

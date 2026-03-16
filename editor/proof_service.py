@@ -11,8 +11,9 @@ import sys
 
 from django.conf import settings
 from django.utils import timezone
+from pypdf import PdfReader
 
-from .export import tiptap_to_docx_with_style_anchor, tiptap_to_docx_with_template
+from .export import tiptap_to_docx_with_style_anchor, tiptap_to_docx_with_template, tiptap_to_pdf
 from .style_anchor_service import resolve_style_anchor_for_document
 
 try:
@@ -111,8 +112,10 @@ class SofficeRenderBackend:
         "/Applications/OpenOffice.app/Contents/MacOS/soffice",
         "/opt/homebrew/bin/soffice",
         "/usr/local/bin/soffice",
+        "/usr/bin/soffice",
         "/opt/homebrew/bin/libreoffice",
         "/usr/local/bin/libreoffice",
+        "/usr/bin/libreoffice",
     )
 
     def __init__(self) -> None:
@@ -267,13 +270,35 @@ def render_document_proof(document, *, user, force: bool = False) -> dict:
     docx_path.write_bytes(artifact.docx_bytes)
 
     renderer = WordRenderService()
-    backend_name = renderer.render_docx_to_pdf(docx_path, pdf_path)
-    page_images = _render_pdf_pages(pdf_path, output_dir / "page")
+    backend_name = ""
+    manifest_extra = {}
+    try:
+        backend_name = renderer.render_docx_to_pdf(docx_path, pdf_path)
+        manifest_extra["exact_render"] = True
+    except ProofRenderError as exc:
+        try:
+            pdf_buffer = tiptap_to_pdf(
+                document.content,
+                title=document.title,
+                export_format=artifact.export_format,
+            )
+        except Exception as fallback_exc:
+            raise ProofRenderError(f"{exc}; internal_pdf: {fallback_exc}") from fallback_exc
+        pdf_path.write_bytes(pdf_buffer.getvalue())
+        backend_name = "internal_pdf"
+        manifest_extra.update(
+            {
+                "exact_render": False,
+                "notice": "Exact Word rendering was unavailable, so this preview is showing the internal PDF export instead.",
+            }
+        )
+    page_count, page_images = _build_pdf_preview_assets(pdf_path, output_dir / "page")
     manifest = _build_manifest(
         kind="document",
         identifier=str(document.id),
         output_dir=output_dir,
         pdf_path=pdf_path,
+        page_count=page_count,
         page_images=page_images,
         backend_name=backend_name,
         source_kind=artifact.source_kind,
@@ -281,6 +306,7 @@ def render_document_proof(document, *, user, force: bool = False) -> dict:
         content_hash=content_hash,
         filename=artifact.filename,
         style_anchor_id=artifact.style_anchor_id,
+        extra=manifest_extra,
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
@@ -331,12 +357,13 @@ def render_exemplar_preview(exemplar, *, force: bool = False) -> dict:
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
         return manifest
 
-    page_images = _render_pdf_pages(pdf_path, output_dir / "page")
+    page_count, page_images = _build_pdf_preview_assets(pdf_path, output_dir / "page")
     manifest = _build_manifest(
         kind="exemplar",
         identifier=str(exemplar.id),
         output_dir=output_dir,
         pdf_path=pdf_path,
+        page_count=page_count,
         page_images=page_images,
         backend_name=backend_name,
         source_kind=exemplar.kind,
@@ -360,6 +387,7 @@ def _build_manifest(
     identifier: str,
     output_dir: Path,
     pdf_path: Path,
+    page_count: int,
     page_images: list[Path],
     backend_name: str,
     source_kind: str,
@@ -375,7 +403,7 @@ def _build_manifest(
         "preview_available": True,
         "hash": content_hash,
         "pdf_url": _media_url_for(pdf_path),
-        "page_count": len(page_images),
+        "page_count": page_count,
         "pages": [
             {
                 "index": index + 1,
@@ -393,6 +421,17 @@ def _build_manifest(
     if extra:
         manifest.update(extra)
     return manifest
+
+
+def _build_pdf_preview_assets(pdf_path: Path, output_prefix: Path) -> tuple[int, list[Path]]:
+    page_count = _pdf_page_count(pdf_path)
+    try:
+        page_images = _render_pdf_pages(pdf_path, output_prefix)
+    except ProofRenderError:
+        page_images = []
+    if not page_count:
+        page_count = len(page_images)
+    return page_count, page_images
 
 
 def _render_pdf_pages(pdf_path: Path, output_prefix: Path) -> list[Path]:
@@ -426,6 +465,13 @@ def _safe_docx_filename(title: str) -> str:
     filename = (title or "Document").replace("/", " ").replace("\\", " ").strip()
     filename = "_".join(filename.split())[:80] or "Document"
     return f"{filename}.docx"
+
+
+def _pdf_page_count(pdf_path: Path) -> int:
+    try:
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception:
+        return 0
 
 
 def _candidate_paths(env_vars: tuple[str, ...], fallback_paths: tuple[str, ...], *, command_names: tuple[str, ...] = ()) -> list[str]:
