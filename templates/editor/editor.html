@@ -1030,6 +1030,30 @@ async function renderProofManifest(manifest) {
   }
 }
 
+function buildProofErrorMarkup(payload, fallbackMessage) {
+  const message = escapeHtml((payload && payload.error) || fallbackMessage || 'Preview unavailable.');
+  const backends = Array.isArray(payload && payload.backend_status) ? payload.backend_status : [];
+  const backendMarkup = backends.length
+    ? `
+      <div class="mt-3 space-y-2 text-xs text-gray-600">
+        ${backends.map(backend => `
+          <div class="rounded border border-gray-200 bg-white px-3 py-2">
+            <div class="font-semibold text-gray-800">${escapeHtml(backend.name || 'backend')} ${backend.available ? 'available' : 'unavailable'}</div>
+            <div class="mt-1">${escapeHtml(backend.detail || '')}</div>
+          </div>
+        `).join('')}
+      </div>
+    `
+    : '';
+  return `
+    <div class="proof-empty">
+      <div class="font-semibold text-gray-800">Preview unavailable.</div>
+      <div class="mt-2 text-sm text-gray-600">${message}</div>
+      ${backendMarkup}
+    </div>
+  `;
+}
+
 async function refreshProofManifest(force = true) {
   if (proofRefreshing) return;
   proofRefreshing = true;
@@ -1042,7 +1066,9 @@ async function refreshProofManifest(force = true) {
     const res = await fetch(url, options);
     const data = await readApiPayload(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Unable to generate the proof preview.');
+      const error = new Error(data.error || 'Unable to generate the proof preview.');
+      error.payload = data;
+      throw error;
     }
     proofManifest = data;
     documentMetadata.preview_state = {
@@ -1055,7 +1081,7 @@ async function refreshProofManifest(force = true) {
     await renderProofManifest(data);
   } catch (error) {
     setProofStatus(error?.message || 'Unable to generate the proof preview.', 'error');
-    proofPreviewNode.innerHTML = '<div class="proof-empty">Preview unavailable.</div>';
+    proofPreviewNode.innerHTML = buildProofErrorMarkup(error?.payload, error?.message);
   } finally {
     proofRefreshing = false;
   }

@@ -1,5 +1,6 @@
 from unittest.mock import patch
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 import shutil
 import tempfile
@@ -42,6 +43,7 @@ from .models import (
     Exemplar,
 )
 from .openai_file_service import analyze_client_file_with_input_file, sync_client_file_openai_index
+from .proof_service import ProofRenderError, SofficeRenderBackend
 
 
 def _sample_tiptap(text):
@@ -2028,6 +2030,30 @@ class ProofPreviewViewTests(TestCase):
         self.document.refresh_from_db()
         self.assertEqual(self.document.metadata["preview_state"]["hash"], "abc123")
 
+    @patch("editor.views.WordRenderService")
+    @patch("editor.views.render_document_proof")
+    def test_proof_manifest_endpoint_returns_backend_diagnostics_on_error(
+        self,
+        render_document_proof,
+        word_render_service,
+    ):
+        render_document_proof.side_effect = ProofRenderError("No proof render backend is available.")
+        word_render_service.return_value.backend_status.return_value = [
+            {
+                "name": "soffice",
+                "available": False,
+                "path": "",
+                "detail": "LibreOffice/soffice was not found.",
+            }
+        ]
+
+        response = self.client.get(reverse("proof_manifest", kwargs={"doc_id": self.document.id}))
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"], "No proof render backend is available.")
+        self.assertEqual(payload["backend_status"][0]["name"], "soffice")
+
     def test_set_document_style_source_persists_exemplar_override(self):
         exemplar = Exemplar.objects.create(
             title="Style Master",
@@ -2050,6 +2076,21 @@ class ProofPreviewViewTests(TestCase):
         self.document.refresh_from_db()
         self.assertEqual(self.document.metadata["style_source_exemplar_id"], exemplar.id)
         self.assertEqual(self.document.metadata["style_source_label"], "Style Master")
+
+
+class ProofRenderBackendTests(TestCase):
+    @patch("editor.proof_service.shutil.which", return_value=None)
+    def test_soffice_backend_finds_standard_binary_without_path_lookup(self, _which):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            binary_path = Path(tmpdir) / "soffice"
+            binary_path.write_text("#!/bin/sh\nexit 0\n")
+            binary_path.chmod(0o755)
+
+            with patch.object(SofficeRenderBackend, "binary_candidates", (str(binary_path),)):
+                backend = SofficeRenderBackend()
+
+        self.assertEqual(backend.binary, str(binary_path))
+        self.assertTrue(backend.is_available())
 
 
 class ExemplarWorkflowTests(TestCase):

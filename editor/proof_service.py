@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import hashlib
 import json
@@ -39,9 +40,42 @@ class ProofRenderError(RuntimeError):
 
 class WordRenderBackend:
     name = "word_mac"
+    app_env_vars = ("CHLF_WORD_APP_PATH", "MICROSOFT_WORD_APP_PATH")
+    app_candidates = (
+        "/Applications/Microsoft Word.app",
+        "~/Applications/Microsoft Word.app",
+    )
+
+    def __init__(self) -> None:
+        self.app_path = _first_existing_path(
+            _candidate_paths(self.app_env_vars, self.app_candidates)
+        )
 
     def is_available(self) -> bool:
-        return bool(docx2pdf_convert) and Path("/Applications/Microsoft Word.app").exists()
+        return bool(docx2pdf_convert) and bool(self.app_path)
+
+    def diagnostic(self) -> dict:
+        if self.is_available():
+            return {
+                "name": self.name,
+                "available": True,
+                "path": self.app_path,
+                "detail": f"Using {self.app_path}.",
+            }
+
+        detail_parts: list[str] = []
+        if not docx2pdf_convert:
+            detail_parts.append("docx2pdf is not installed in the active Python environment.")
+        if not self.app_path:
+            detail_parts.append(
+                "Microsoft Word.app was not found in the standard macOS locations or WORD app env vars."
+            )
+        return {
+            "name": self.name,
+            "available": False,
+            "path": self.app_path,
+            "detail": " ".join(detail_parts) or "Microsoft Word rendering is unavailable.",
+        }
 
     def render_docx_to_pdf(self, input_path: Path, output_path: Path) -> None:
         if not self.is_available():
@@ -71,12 +105,42 @@ class WordRenderBackend:
 
 class SofficeRenderBackend:
     name = "soffice"
+    binary_env_vars = ("CHLF_SOFFICE_BINARY", "SOFFICE_BINARY", "LIBREOFFICE_BINARY")
+    binary_candidates = (
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "/Applications/OpenOffice.app/Contents/MacOS/soffice",
+        "/opt/homebrew/bin/soffice",
+        "/usr/local/bin/soffice",
+        "/opt/homebrew/bin/libreoffice",
+        "/usr/local/bin/libreoffice",
+    )
 
     def __init__(self) -> None:
-        self.binary = shutil.which("soffice") or shutil.which("libreoffice")
+        self.checked_locations = _candidate_paths(
+            self.binary_env_vars,
+            self.binary_candidates,
+            command_names=("soffice", "libreoffice"),
+        )
+        self.binary = _first_existing_executable(self.checked_locations)
 
     def is_available(self) -> bool:
         return bool(self.binary)
+
+    def diagnostic(self) -> dict:
+        if self.binary:
+            return {
+                "name": self.name,
+                "available": True,
+                "path": self.binary,
+                "detail": f"Using {self.binary}.",
+            }
+        checked = ", ".join(self.checked_locations) if self.checked_locations else "no locations"
+        return {
+            "name": self.name,
+            "available": False,
+            "path": "",
+            "detail": f"LibreOffice/soffice was not found. Checked: {checked}.",
+        }
 
     def render_docx_to_pdf(self, input_path: Path, output_path: Path) -> None:
         if not self.binary:
@@ -111,17 +175,22 @@ class WordRenderService:
     def __init__(self) -> None:
         self.backends = [WordRenderBackend(), SofficeRenderBackend()]
 
+    def backend_status(self) -> list[dict]:
+        return [backend.diagnostic() for backend in self.backends]
+
     def render_docx_to_pdf(self, input_path: Path, output_path: Path) -> str:
         errors: list[str] = []
         for backend in self.backends:
-            if not backend.is_available():
+            diagnostic = backend.diagnostic()
+            if not diagnostic["available"]:
+                errors.append(f'{backend.name}: unavailable ({diagnostic["detail"]})')
                 continue
             try:
                 backend.render_docx_to_pdf(input_path, output_path)
                 return backend.name
             except Exception as exc:  # pragma: no cover - platform dependent
                 errors.append(f"{backend.name}: {exc}")
-        raise ProofRenderError("; ".join(errors) or "No proof-render backend is available.")
+        raise ProofRenderError("; ".join(errors) or "No proof render backend is available.")
 
 
 def build_document_docx_artifact(document, *, user) -> DocumentDocxArtifact:
@@ -357,3 +426,41 @@ def _safe_docx_filename(title: str) -> str:
     filename = (title or "Document").replace("/", " ").replace("\\", " ").strip()
     filename = "_".join(filename.split())[:80] or "Document"
     return f"{filename}.docx"
+
+
+def _candidate_paths(env_vars: tuple[str, ...], fallback_paths: tuple[str, ...], *, command_names: tuple[str, ...] = ()) -> list[str]:
+    candidates: list[str] = []
+    for env_var in env_vars:
+        value = os.environ.get(env_var)
+        if value:
+            candidates.append(value)
+    for command_name in command_names:
+        resolved = shutil.which(command_name)
+        if resolved:
+            candidates.append(resolved)
+    candidates.extend(fallback_paths)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        expanded = str(Path(candidate).expanduser())
+        if expanded not in seen:
+            deduped.append(expanded)
+            seen.add(expanded)
+    return deduped
+
+
+def _first_existing_path(candidates: list[str]) -> str:
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return str(path)
+    return ""
+
+
+def _first_existing_executable(candidates: list[str]) -> str:
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.exists() and path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return ""

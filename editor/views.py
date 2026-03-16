@@ -15,7 +15,12 @@ from .models import Document, DocumentType, DocumentVersion
 from .document_text import extract_plain_text
 from .export import tiptap_to_pdf
 from .import_service import import_docx_package
-from .proof_service import ProofRenderError, build_document_docx_artifact, render_document_proof
+from .proof_service import (
+    ProofRenderError,
+    WordRenderService,
+    build_document_docx_artifact,
+    render_document_proof,
+)
 
 
 AUTO_SNAPSHOT_MINUTES = int(os.environ.get("AUTO_SNAPSHOT_MINUTES", "10"))
@@ -231,7 +236,13 @@ def proof_refresh(request, doc_id):
     try:
         manifest = render_document_proof(doc, user=request.user, force=True)
     except ProofRenderError as exc:
-        return JsonResponse({"error": str(exc)}, status=503)
+        return JsonResponse(
+            {
+                "error": str(exc),
+                "backend_status": WordRenderService().backend_status(),
+            },
+            status=503,
+        )
 
     doc.metadata = normalize_document_metadata(
         doc.metadata,
@@ -256,7 +267,13 @@ def proof_manifest(request, doc_id):
     try:
         manifest = render_document_proof(doc, user=request.user, force=force)
     except ProofRenderError as exc:
-        return JsonResponse({"error": str(exc)}, status=503)
+        return JsonResponse(
+            {
+                "error": str(exc),
+                "backend_status": WordRenderService().backend_status(),
+            },
+            status=503,
+        )
     return JsonResponse(manifest)
 
 
