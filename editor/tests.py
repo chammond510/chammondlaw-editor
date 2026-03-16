@@ -30,7 +30,7 @@ from .agent_service import (
     _requested_full_text_sources,
 )
 from .export import tiptap_to_docx, tiptap_to_html
-from .import_service import import_docx_to_tiptap
+from .import_service import import_docx_package, import_docx_to_tiptap
 from .models import (
     Document,
     DocumentClientFile,
@@ -39,6 +39,7 @@ from .models import (
     DocumentResearchSession,
     DocumentVersion,
     DocumentType,
+    Exemplar,
 )
 from .openai_file_service import analyze_client_file_with_input_file, sync_client_file_openai_index
 
@@ -1886,6 +1887,17 @@ class DocumentImportTests(TestCase):
         self.assertEqual(nodes[2]["type"], "bulletList")
         self.assertEqual(nodes[3]["type"], "table")
 
+    def test_import_docx_package_captures_word_metadata(self):
+        package = import_docx_package(BytesIO(_build_docx_bytes()))
+
+        self.assertAlmostEqual(package["metadata"]["page_setup"]["left_margin_pt"], 72.0, places=1)
+        paragraph_attrs = package["content"]["content"][1]["attrs"]
+        self.assertEqual(paragraph_attrs["word_style"]["name"], "Normal")
+        self.assertIn("space_before_pt", paragraph_attrs["paragraph_metrics"])
+        first_text_marks = package["content"]["content"][1]["content"][1]["marks"]
+        self.assertTrue(any(mark["type"] == "wordRun" for mark in first_text_marks))
+        self.assertIn("list_identity", package["content"]["content"][2]["attrs"])
+
     def test_import_document_creates_editable_document_with_source_docx(self):
         upload = SimpleUploadedFile(
             "existing-brief.docx",
@@ -1909,6 +1921,8 @@ class DocumentImportTests(TestCase):
         self.assertEqual(document.versions.count(), 1)
         self.assertEqual(document.versions.first().label, "Imported from Word")
         self.assertEqual(document.content.get("type"), "doc")
+        self.assertEqual(document.metadata["fidelity_mode"], "proof")
+        self.assertEqual(document.metadata["source_docx_info"]["filename"], "existing-brief.docx")
 
     def test_docx_export_uses_source_docx_template_when_present(self):
         upload = SimpleUploadedFile(
@@ -1972,6 +1986,142 @@ class CoverLetterExportTests(TestCase):
         self.assertGreaterEqual(len(exported.tables), 2)
         self.assertEqual(exported.tables[0].cell(0, 0).text.strip(), "EXHIBIT 1")
         self.assertEqual(exported.tables[0].cell(1, 0).text.strip(), "EXHIBIT 2")
+
+
+class ProofPreviewViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="proof-user", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="Proof Brief",
+            slug="proof-brief",
+            category="brief",
+            export_format="court_brief",
+            template_content=_sample_tiptap("Template"),
+        )
+        self.document = Document.objects.create(
+            title="Proof Draft",
+            document_type=self.document_type,
+            content=_sample_tiptap("Proof content."),
+            created_by=self.user,
+        )
+
+    @patch("editor.views.render_document_proof")
+    def test_proof_manifest_endpoint_returns_manifest(self, render_document_proof):
+        render_document_proof.return_value = {
+            "kind": "document",
+            "id": str(self.document.id),
+            "preview_available": True,
+            "hash": "abc123",
+            "pdf_url": "/media/proof.pdf",
+            "page_count": 2,
+            "pages": [{"index": 1, "image_url": "/media/page-1.png"}],
+            "backend": "word_mac",
+            "generated_at": "2026-03-16T15:00:00Z",
+        }
+
+        response = self.client.post(reverse("proof_refresh", kwargs={"doc_id": self.document.id}))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["backend"], "word_mac")
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.metadata["preview_state"]["hash"], "abc123")
+
+    def test_set_document_style_source_persists_exemplar_override(self):
+        exemplar = Exemplar.objects.create(
+            title="Style Master",
+            document_type=self.document_type,
+            kind="style_anchor",
+            style_family="uscis_cover_letter",
+            original_file=SimpleUploadedFile(
+                "style-master.docx",
+                _build_docx_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            created_by=self.user,
+        )
+
+        response = self.client.post(
+            reverse("document_style_source", kwargs={"doc_id": self.document.id, "exemplar_id": exemplar.id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.metadata["style_source_exemplar_id"], exemplar.id)
+        self.assertEqual(self.document.metadata["style_source_label"], "Style Master")
+
+
+class ExemplarWorkflowTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._media_root = tempfile.mkdtemp(prefix="editor-exemplar-tests-")
+        cls._override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="exemplar-user", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="Exemplar Brief",
+            slug="exemplar-brief",
+            category="brief",
+            export_format="court_brief",
+            template_content=_sample_tiptap("Template"),
+        )
+        self.exemplar = Exemplar.objects.create(
+            title="Master Exemplar",
+            document_type=self.document_type,
+            kind="style_anchor",
+            style_family="uscis_cover_letter",
+            original_file=SimpleUploadedFile(
+                "master-exemplar.docx",
+                _build_docx_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            extracted_text="Master exemplar body text.",
+            created_by=self.user,
+        )
+
+    def test_open_exemplar_as_draft_creates_proof_mode_document(self):
+        response = self.client.post(
+            reverse("exemplar_open_as_draft", kwargs={"exemplar_id": self.exemplar.id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        created = Document.objects.get(id=payload["document_id"])
+        self.assertTrue(bool(created.source_docx))
+        self.assertEqual(created.metadata["fidelity_mode"], "proof")
+        self.assertEqual(created.metadata["source_exemplar_id"], self.exemplar.id)
+        self.assertEqual(created.metadata["style_source_exemplar_id"], self.exemplar.id)
+
+    @patch("editor.exemplar_views.render_exemplar_preview")
+    def test_exemplar_preview_endpoint_returns_preview_payload(self, render_exemplar_preview):
+        render_exemplar_preview.return_value = {
+            "kind": "exemplar",
+            "id": self.exemplar.id,
+            "preview_available": True,
+            "pdf_url": "/media/proof-previews/exemplar.pdf",
+            "page_count": 1,
+            "pages": [{"index": 1, "image_url": "/media/proof-previews/exemplar-1.png"}],
+            "backend": "word_mac",
+            "filename": "master-exemplar.docx",
+        }
+
+        response = self.client.get(reverse("exemplar_preview", kwargs={"exemplar_id": self.exemplar.id}))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["page_count"], 1)
+        self.assertIn("open_as_draft_url", payload)
 
 
 class SeedTemplatesTests(TestCase):

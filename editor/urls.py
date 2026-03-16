@@ -17,6 +17,13 @@ urlpatterns = [
     # API
     path("api/save/<uuid:doc_id>/", views.api_save, name="api_save"),
     path("api/title/<uuid:doc_id>/", views.api_update_title, name="api_update_title"),
+    path("api/documents/<uuid:doc_id>/proof-refresh/", views.proof_refresh, name="proof_refresh"),
+    path("api/documents/<uuid:doc_id>/proof-manifest/", views.proof_manifest, name="proof_manifest"),
+    path(
+        "api/documents/<uuid:doc_id>/style-source/<int:exemplar_id>/",
+        views.set_document_style_source,
+        name="document_style_source",
+    ),
     path("api/versions/<uuid:doc_id>/", views.api_versions, name="api_versions"),
     path(
         "api/version/<uuid:doc_id>/<int:version_id>/",
@@ -66,6 +73,12 @@ urlpatterns = [
     path("api/exemplars/upload/", exemplar_views.exemplar_upload, name="exemplar_upload"),
     path("api/exemplars/search/", exemplar_views.exemplar_search, name="exemplar_search"),
     path("api/exemplars/<int:exemplar_id>/", exemplar_views.exemplar_detail, name="exemplar_detail"),
+    path("api/exemplars/<int:exemplar_id>/preview/", exemplar_views.exemplar_preview, name="exemplar_preview"),
+    path(
+        "api/exemplars/<int:exemplar_id>/open/",
+        exemplar_views.exemplar_open_as_draft,
+        name="exemplar_open_as_draft",
+    ),
     path(
         "api/exemplars/suggest/<uuid:doc_id>/",
         exemplar_views.exemplar_suggest_for_document,

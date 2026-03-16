@@ -11,7 +11,7 @@ from html import escape
 
 from docx import Document as DocxDocument
 from docx.shared import Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_BREAK, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -45,9 +45,14 @@ FORMAT_PRESETS = {
 DATE_PATTERN = re.compile(r"^\s*(\[[Dd]ate\]|[A-Z][a-z]+ \d{1,2}, \d{4}|\d{1,2}/\d{1,2}/\d{2,4})")
 
 
-def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief"):
+def tiptap_to_docx(tiptap_json, title="Document", export_format="court_brief", document_metadata=None):
     """Convert Tiptap JSON content to a .docx file buffer."""
-    return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
+    return _tiptap_to_docx_generic(
+        tiptap_json,
+        title=title,
+        export_format=export_format,
+        document_metadata=document_metadata,
+    )
 
 
 def tiptap_to_docx_with_template(
@@ -55,12 +60,14 @@ def tiptap_to_docx_with_template(
     title="Document",
     export_format="court_brief",
     template_path="",
+    document_metadata=None,
 ):
     return _tiptap_to_docx_generic(
         tiptap_json,
         title=title,
         export_format=export_format,
         template_path=template_path,
+        document_metadata=document_metadata,
     )
 
 
@@ -69,6 +76,7 @@ def tiptap_to_docx_with_style_anchor(
     title="Document",
     export_format="court_brief",
     style_anchor=None,
+    document_metadata=None,
 ):
     if export_format == "cover_letter" and style_anchor:
         return _tiptap_to_cover_letter_docx(
@@ -76,10 +84,21 @@ def tiptap_to_docx_with_style_anchor(
             title=title,
             style_anchor=style_anchor,
         )
-    return _tiptap_to_docx_generic(tiptap_json, title=title, export_format=export_format)
+    return _tiptap_to_docx_generic(
+        tiptap_json,
+        title=title,
+        export_format=export_format,
+        document_metadata=document_metadata,
+    )
 
 
-def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_brief", template_path=""):
+def _tiptap_to_docx_generic(
+    tiptap_json,
+    title="Document",
+    export_format="court_brief",
+    template_path="",
+    document_metadata=None,
+):
     """Convert Tiptap JSON content to a .docx file buffer."""
     doc = DocxDocument(template_path) if template_path else DocxDocument()
     preset = FORMAT_PRESETS.get(export_format, FORMAT_PRESETS["court_brief"])
@@ -94,6 +113,7 @@ def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_
             section.bottom_margin = Inches(preset["margin_inches"])
             section.left_margin = Inches(preset["margin_inches"])
             section.right_margin = Inches(preset["margin_inches"])
+        _apply_document_page_setup(doc, document_metadata or {})
 
         # Configure default style
         style = doc.styles["Normal"]
@@ -126,7 +146,14 @@ def _tiptap_to_docx_generic(tiptap_json, title="Document", export_format="court_
     footnotes = []
 
     for node in content:
-        _process_node(doc, node, preset, para_counter, footnotes, preserve_template_styles=preserve_template_styles)
+        _process_node(
+            doc,
+            node,
+            preset,
+            para_counter,
+            footnotes,
+            preserve_template_styles=preserve_template_styles,
+        )
 
     if footnotes:
         doc.add_page_break()
@@ -359,6 +386,153 @@ def _apply_text_alignment(paragraph, alignment):
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
 
+def _apply_document_page_setup(doc, document_metadata):
+    page_setup = (document_metadata or {}).get("page_setup") or {}
+    if not page_setup:
+        return
+    for section in doc.sections:
+        if page_setup.get("page_width_pt") is not None:
+            section.page_width = Pt(page_setup["page_width_pt"])
+        if page_setup.get("page_height_pt") is not None:
+            section.page_height = Pt(page_setup["page_height_pt"])
+        if page_setup.get("left_margin_pt") is not None:
+            section.left_margin = Pt(page_setup["left_margin_pt"])
+        if page_setup.get("right_margin_pt") is not None:
+            section.right_margin = Pt(page_setup["right_margin_pt"])
+        if page_setup.get("top_margin_pt") is not None:
+            section.top_margin = Pt(page_setup["top_margin_pt"])
+        if page_setup.get("bottom_margin_pt") is not None:
+            section.bottom_margin = Pt(page_setup["bottom_margin_pt"])
+        if page_setup.get("header_distance_pt") is not None:
+            section.header_distance = Pt(page_setup["header_distance_pt"])
+        if page_setup.get("footer_distance_pt") is not None:
+            section.footer_distance = Pt(page_setup["footer_distance_pt"])
+
+
+def _resolve_style_name(doc, attrs, fallback=""):
+    word_style = attrs.get("word_style") or {}
+    candidate_names = [
+        word_style.get("name") or "",
+        word_style.get("style_id") or "",
+        fallback or "",
+    ]
+    for name in candidate_names:
+        if not name:
+            continue
+        try:
+            doc.styles[name]
+            return name
+        except KeyError:
+            continue
+    return fallback or ""
+
+
+def _apply_paragraph_metrics(paragraph, metrics):
+    if not metrics:
+        return
+    fmt = paragraph.paragraph_format
+    if metrics.get("left_indent_pt") is not None:
+        fmt.left_indent = Pt(metrics["left_indent_pt"])
+    if metrics.get("right_indent_pt") is not None:
+        fmt.right_indent = Pt(metrics["right_indent_pt"])
+    if metrics.get("first_line_indent_pt") is not None:
+        fmt.first_line_indent = Pt(metrics["first_line_indent_pt"])
+    if metrics.get("space_before_pt") is not None:
+        fmt.space_before = Pt(metrics["space_before_pt"])
+    if metrics.get("space_after_pt") is not None:
+        fmt.space_after = Pt(metrics["space_after_pt"])
+    if metrics.get("line_spacing") is not None:
+        fmt.line_spacing = metrics["line_spacing"]
+    line_spacing_rule = str(metrics.get("line_spacing_rule") or "").upper()
+    if "DOUBLE" in line_spacing_rule:
+        fmt.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    elif "SINGLE" in line_spacing_rule:
+        fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    elif "ONE_POINT_FIVE" in line_spacing_rule:
+        fmt.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+    elif "EXACTLY" in line_spacing_rule:
+        fmt.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    elif "AT_LEAST" in line_spacing_rule:
+        fmt.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+    if metrics.get("keep_together") is not None:
+        fmt.keep_together = metrics["keep_together"]
+    if metrics.get("keep_with_next") is not None:
+        fmt.keep_with_next = metrics["keep_with_next"]
+    if metrics.get("page_break_before") is not None:
+        fmt.page_break_before = metrics["page_break_before"]
+    if metrics.get("widow_control") is not None:
+        fmt.widow_control = metrics["widow_control"]
+    _apply_tab_stops(fmt, metrics.get("tab_stops") or [])
+
+
+def _apply_tab_stops(paragraph_format, tab_stops):
+    if not tab_stops:
+        return
+    alignment_map = {
+        "left": WD_TAB_ALIGNMENT.LEFT,
+        "center": WD_TAB_ALIGNMENT.CENTER,
+        "right": WD_TAB_ALIGNMENT.RIGHT,
+        "decimal": WD_TAB_ALIGNMENT.DECIMAL,
+        "bar": WD_TAB_ALIGNMENT.BAR,
+    }
+    leader_map = {
+        "spaces": WD_TAB_LEADER.SPACES,
+        "dots": WD_TAB_LEADER.DOTS,
+        "dashes": WD_TAB_LEADER.DASHES,
+        "lines": WD_TAB_LEADER.LINES,
+        "heavy": WD_TAB_LEADER.HEAVY,
+        "middle_dot": WD_TAB_LEADER.MIDDLE_DOT,
+    }
+    for stop in tab_stops:
+        position = stop.get("position_pt")
+        if position is None:
+            continue
+        paragraph_format.tab_stops.add_tab_stop(
+            Pt(position),
+            alignment=alignment_map.get(stop.get("alignment"), WD_TAB_ALIGNMENT.LEFT),
+            leader=leader_map.get(stop.get("leader"), WD_TAB_LEADER.SPACES),
+        )
+
+
+def _apply_paragraph_attrs(paragraph, doc, node, fallback_style="", default_indent=False):
+    attrs = node.get("attrs", {}) or {}
+    style_name = _resolve_style_name(doc, attrs, fallback=fallback_style)
+    if style_name:
+        paragraph.style = style_name
+    _apply_paragraph_metrics(paragraph, attrs.get("paragraph_metrics") or {})
+    _apply_text_alignment(paragraph, attrs.get("textAlign") or (attrs.get("paragraph_metrics") or {}).get("alignment"))
+    if default_indent and not attrs.get("paragraph_metrics"):
+        paragraph.paragraph_format.left_indent = Inches(0.5)
+
+
+def _apply_run_metrics(run, metrics):
+    if not metrics:
+        return
+    if metrics.get("font_name"):
+        run.font.name = metrics["font_name"]
+    if metrics.get("font_size_pt") is not None:
+        run.font.size = Pt(metrics["font_size_pt"])
+    if metrics.get("bold") is not None:
+        run.font.bold = metrics["bold"]
+        run.bold = metrics["bold"]
+    if metrics.get("italic") is not None:
+        run.font.italic = metrics["italic"]
+        run.italic = metrics["italic"]
+    if metrics.get("underline") is not None:
+        run.font.underline = metrics["underline"]
+        run.underline = metrics["underline"]
+    if metrics.get("all_caps") is not None:
+        run.font.all_caps = metrics["all_caps"]
+    if metrics.get("small_caps") is not None:
+        run.font.small_caps = metrics["small_caps"]
+    if metrics.get("strike") is not None:
+        run.font.strike = metrics["strike"]
+    if metrics.get("superscript") is not None:
+        run.font.superscript = metrics["superscript"]
+    if metrics.get("subscript") is not None:
+        run.font.subscript = metrics["subscript"]
+
+
 def _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run):
     for part in inline_parts:
         part_type = part.get("type")
@@ -366,6 +540,7 @@ def _apply_inline_parts_with_sample(paragraph, inline_parts, sample_run):
             run = paragraph.add_run(part.get("text", ""))
             _copy_run_style(run, sample_run)
             marks = part.get("marks", {})
+            _apply_run_metrics(run, (marks.get("wordRun") or {}).get("run_metrics") or {})
             if "bold" in marks:
                 run.bold = True
             if "italic" in marks:
@@ -645,9 +820,10 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
         level = node.get("attrs", {}).get("level", 1)
         level = min(max(level, 1), 3)
         inline_parts = _extract_inline_parts(node)
-        p = doc.add_heading(level=level)
+        fallback_style = f"Heading {level}"
+        p = doc.add_paragraph(style=fallback_style if fallback_style in doc.styles else None)
+        _apply_paragraph_attrs(p, doc, node, fallback_style=fallback_style)
         _apply_text_parts(p, inline_parts, footnotes)
-        _apply_text_alignment(p, node.get("attrs", {}).get("textAlign"))
 
     elif node_type == "paragraph":
         inline_parts = _extract_inline_parts(node)
@@ -662,26 +838,34 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
         if preset.get("numbered_paragraphs"):
             para_counter[0] += 1
             p = doc.add_paragraph()
+            _apply_paragraph_attrs(p, doc, node, fallback_style="Normal")
             run = p.add_run(f"{para_counter[0]}. ")
             run.font.name = preset["font_name"]
             run.font.size = Pt(preset["font_size"])
             _apply_text_parts(p, inline_parts, footnotes)
         else:
             p = doc.add_paragraph()
+            _apply_paragraph_attrs(p, doc, node, fallback_style="Normal")
             _apply_text_parts(p, inline_parts, footnotes)
-
-        # Handle text alignment
-        _apply_text_alignment(p, node.get("attrs", {}).get("textAlign"))
 
     elif node_type == "bulletList":
         for item in node.get("content", []):
-            _process_list_item(doc, item, preset, footnotes, bullet=True, preserve_template_styles=preserve_template_styles)
+            _process_list_item(
+                doc,
+                item,
+                node,
+                preset,
+                footnotes,
+                bullet=True,
+                preserve_template_styles=preserve_template_styles,
+            )
 
     elif node_type == "orderedList":
         for i, item in enumerate(node.get("content", []), 1):
             _process_list_item(
                 doc,
                 item,
+                node,
                 preset,
                 footnotes,
                 bullet=False,
@@ -694,8 +878,7 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
             if child.get("type") == "paragraph":
                 inline_parts = _extract_inline_parts(child)
                 p = doc.add_paragraph()
-                p.paragraph_format.left_indent = Inches(0.5)
-                p.style = doc.styles["Normal"]
+                _apply_paragraph_attrs(p, doc, child, fallback_style="Normal", default_indent=True)
                 _apply_text_parts(p, inline_parts, footnotes)
 
     elif node_type == "horizontalRule":
@@ -717,16 +900,28 @@ def _process_node(doc, node, preset, para_counter, footnotes, *, preserve_templa
         pass  # Handled within text extraction
 
 
-def _process_list_item(doc, item, preset, footnotes, bullet=True, number=None, preserve_template_styles=False):
+def _process_list_item(doc, item, list_node, preset, footnotes, bullet=True, number=None, preserve_template_styles=False):
     """Process a list item node."""
+    list_attrs = (list_node.get("attrs") or {}) if isinstance(list_node, dict) else {}
+    fallback_style = (
+        ((list_attrs.get("list_identity") or {}).get("style_name") or "")
+        or ("List Bullet" if bullet else "List Number")
+    )
+    try:
+        doc.styles[fallback_style]
+    except KeyError:
+        fallback_style = "List Bullet" if bullet else "List Number"
     for child in item.get("content", []):
         if child.get("type") == "paragraph":
             inline_parts = _extract_inline_parts(child)
-            if bullet:
-                p = doc.add_paragraph(style="List Bullet")
-            else:
-                p = doc.add_paragraph(style="List Number")
+            p = doc.add_paragraph(style=fallback_style)
             _apply_text_parts(p, inline_parts, footnotes)
+            _apply_paragraph_attrs(
+                p,
+                doc,
+                child,
+                fallback_style=fallback_style,
+            )
             if not preserve_template_styles:
                 p.style.font.name = preset["font_name"]
                 p.style.font.size = Pt(preset["font_size"])
@@ -745,8 +940,21 @@ def _process_table(doc, node, preset, footnotes, preserve_template_styles=False)
     ) if rows_data else 1
 
     table = doc.add_table(rows=num_rows, cols=num_cols)
-    if not preserve_template_styles:
+    table_style = ((node.get("attrs") or {}).get("word_style") or {}).get("name") or "Table Grid"
+    try:
+        table.style = table_style
+    except KeyError:
+        if not preserve_template_styles:
+            table.style = "Table Grid"
+    if not preserve_template_styles and table.style is None:
         table.style = "Table Grid"
+    table_alignment = ((node.get("attrs") or {}).get("paragraph_metrics") or {}).get("alignment")
+    if table_alignment == "center":
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    elif table_alignment == "right":
+        table.alignment = WD_TABLE_ALIGNMENT.RIGHT
+    else:
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
 
     for r_idx, row_node in enumerate(rows_data):
         cells = row_node.get("content", [])
@@ -759,6 +967,7 @@ def _process_table(doc, node, preset, footnotes, preserve_template_styles=False)
                     if child.get("type") == "paragraph":
                         inline_parts = _extract_inline_parts(child)
                         p = cell.paragraphs[0] if not cell.paragraphs[0].text else cell.add_paragraph()
+                        _apply_paragraph_attrs(p, doc, child, fallback_style="Normal")
                         _apply_text_parts(p, inline_parts, footnotes)
 
 
@@ -774,7 +983,8 @@ def _extract_inline_parts(node):
             text = child.get("text", "")
             marks = {}
             for mark in child.get("marks", []):
-                marks[mark.get("type", "")] = mark.get("attrs", {})
+                mark_type = mark.get("type", "")
+                marks[mark_type] = mark.get("attrs", {}) if mark.get("attrs") is not None else {}
             parts.append({"type": "text", "text": text, "marks": marks})
         elif child_type == "hardBreak":
             parts.append({"type": "hardBreak"})
@@ -797,6 +1007,7 @@ def _apply_text_parts(paragraph, inline_parts, footnotes):
         if part_type == "text":
             run = paragraph.add_run(part.get("text", ""))
             marks = part.get("marks", {})
+            _apply_run_metrics(run, (marks.get("wordRun") or {}).get("run_metrics") or {})
             if "bold" in marks:
                 run.bold = True
             if "italic" in marks:

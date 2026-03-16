@@ -192,6 +192,35 @@ def resolve_style_anchor_for_document(*, user, document, export_format: str) -> 
 
     from .models import Exemplar
 
+    document_metadata = getattr(document, "metadata", {}) or {}
+    explicit_exemplar_id = document_metadata.get("style_source_exemplar_id")
+    if explicit_exemplar_id:
+        explicit = (
+            Exemplar.objects.filter(
+                id=explicit_exemplar_id,
+                created_by=user,
+                is_active=True,
+            )
+            .select_related("document_type")
+            .first()
+        )
+        if explicit and explicit.original_file and explicit.original_file.name.lower().endswith(".docx"):
+            metadata = dict(explicit.metadata or {})
+            structure = metadata.get("style_anchor_structure")
+            if not structure:
+                structure = extract_style_anchor_structure(explicit.original_file.path)
+                metadata["style_anchor_structure"] = structure
+                explicit.metadata = metadata
+                explicit.save(update_fields=["metadata", "updated_at"])
+            return ResolvedStyleAnchor(
+                path=explicit.original_file.path,
+                source="document_override",
+                exemplar_id=explicit.id,
+                title=explicit.title,
+                style_family=explicit.style_family or style_family,
+                metadata=metadata,
+            )
+
     exemplar = (
         Exemplar.objects.filter(
             created_by=user,
@@ -230,4 +259,3 @@ def resolve_style_anchor_for_document(*, user, document, export_format: str) -> 
         style_family=style_family,
         metadata={"style_anchor_structure": extract_style_anchor_structure(str(fallback_path))},
     )
-

@@ -49,6 +49,7 @@ class Document(models.Model):
         DocumentType, on_delete=models.SET_NULL, null=True, blank=True
     )
     content = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
     source_docx = models.FileField(upload_to="document_imports/", blank=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

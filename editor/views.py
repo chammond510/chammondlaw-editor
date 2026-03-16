@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import timedelta
+from pathlib import Path
 
 from django.contrib import messages
 from django.shortcuts import render, redirect, get_object_or_404
@@ -9,11 +10,12 @@ from django.http import JsonResponse, HttpResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
+from .document_schema import normalize_document_content, normalize_document_metadata
 from .models import Document, DocumentType, DocumentVersion
 from .document_text import extract_plain_text
-from .export import tiptap_to_docx_with_style_anchor, tiptap_to_docx_with_template, tiptap_to_pdf
-from .import_service import import_docx_to_tiptap
-from .style_anchor_service import resolve_style_anchor_for_document
+from .export import tiptap_to_pdf
+from .import_service import import_docx_package
+from .proof_service import ProofRenderError, build_document_docx_artifact, render_document_proof
 
 
 AUTO_SNAPSHOT_MINUTES = int(os.environ.get("AUTO_SNAPSHOT_MINUTES", "10"))
@@ -54,7 +56,8 @@ def create_document(request, type_slug):
     doc = Document.objects.create(
         title=f"New {doc_type.name}",
         document_type=doc_type,
-        content=doc_type.template_content,
+        content=normalize_document_content(doc_type.template_content),
+        metadata=normalize_document_metadata({}, default_fidelity_mode="draft"),
         created_by=request.user,
     )
     return redirect("editor", doc_id=doc.id)
@@ -84,16 +87,27 @@ def import_document(request):
         title = os.path.splitext(os.path.basename(filename))[0][:500] or f"Imported {doc_type.name}"
 
     try:
-        content = import_docx_to_tiptap(uploaded)
+        package = import_docx_package(uploaded)
         uploaded.seek(0)
     except Exception as exc:
         messages.error(request, f"Unable to import that Word file: {exc}")
         return redirect("new_document")
 
+    metadata = normalize_document_metadata(
+        package.get("metadata"),
+        default_fidelity_mode="proof",
+        source_docx_info={
+            "filename": filename,
+            "content_type": getattr(uploaded, "content_type", "") or "",
+            "source": "imported_word",
+        },
+    )
+    metadata["fidelity_mode"] = "proof"
     doc = Document.objects.create(
         title=title,
         document_type=doc_type,
-        content=content,
+        content=package["content"],
+        metadata=metadata,
         source_docx=uploaded,
         created_by=request.user,
     )
@@ -108,12 +122,27 @@ def import_document(request):
 @login_required
 def editor(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    default_fidelity_mode = "proof" if doc.source_docx else "draft"
+    normalized_content = normalize_document_content(doc.content)
+    normalized_metadata = normalize_document_metadata(
+        doc.metadata,
+        default_fidelity_mode=default_fidelity_mode,
+        source_docx_info=_document_source_docx_info(doc),
+    )
+    if normalized_content != doc.content or normalized_metadata != (doc.metadata or {}):
+        doc.content = normalized_content
+        doc.metadata = normalized_metadata
+        doc.save(update_fields=["content", "metadata", "updated_at"])
     versions = doc.versions.order_by("-created_at")[:30]
     document_types = DocumentType.objects.all()
     return render(
         request,
         "editor/editor.html",
-        {"document": doc, "versions": versions, "document_types": document_types},
+        {
+            "document": doc,
+            "versions": versions,
+            "document_types": document_types,
+        },
     )
 
 
@@ -131,14 +160,26 @@ def api_save(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
     try:
         data = json.loads(request.body)
-        new_content = data.get("content", doc.content)
+        new_content = normalize_document_content(data.get("content", doc.content))
+        new_metadata = normalize_document_metadata(
+            data.get("metadata", doc.metadata),
+            default_fidelity_mode=("proof" if doc.source_docx else "draft"),
+            source_docx_info=_document_source_docx_info(doc),
+        )
         force_snapshot = bool(data.get("force_snapshot", False))
         snapshot_label = (data.get("snapshot_label") or "").strip()[:100]
 
         doc.content = new_content
-        doc.save()
+        doc.metadata = new_metadata
+        doc.save(update_fields=["content", "metadata", "updated_at"])
         _maybe_create_snapshot(doc, new_content, force=force_snapshot, label=snapshot_label)
-        return JsonResponse({"status": "ok", "updated_at": doc.updated_at.isoformat()})
+        return JsonResponse(
+            {
+                "status": "ok",
+                "updated_at": doc.updated_at.isoformat(),
+                "metadata": doc.metadata,
+            }
+        )
     except (json.JSONDecodeError, Exception) as e:
         return JsonResponse({"status": "error", "message": str(e)}, status=400)
 
@@ -159,36 +200,12 @@ def api_update_title(request, doc_id):
 @login_required
 def export_docx(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
-    export_format = "court_brief"
-    if doc.document_type:
-        export_format = doc.document_type.export_format
-
-    if doc.source_docx and doc.source_docx.name.lower().endswith(".docx"):
-        docx_buffer = tiptap_to_docx_with_template(
-            doc.content,
-            doc.title,
-            export_format,
-            template_path=doc.source_docx.path,
-        )
-    else:
-        style_anchor = resolve_style_anchor_for_document(
-            user=request.user,
-            document=doc,
-            export_format=export_format,
-        )
-        docx_buffer = tiptap_to_docx_with_style_anchor(
-            doc.content,
-            doc.title,
-            export_format,
-            style_anchor=style_anchor,
-        )
-
-    filename = doc.title.replace(" ", "_")[:50] + ".docx"
+    artifact = build_document_docx_artifact(doc, user=request.user)
     response = HttpResponse(
-        docx_buffer.getvalue(),
+        artifact.docx_bytes,
         content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
-    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Content-Disposition"] = f'attachment; filename="{artifact.filename}"'
     return response
 
 
@@ -205,6 +222,74 @@ def export_pdf(request, doc_id):
     response = HttpResponse(pdf_buffer.getvalue(), content_type="application/pdf")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+
+
+@login_required
+@require_POST
+def proof_refresh(request, doc_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    try:
+        manifest = render_document_proof(doc, user=request.user, force=True)
+    except ProofRenderError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+    doc.metadata = normalize_document_metadata(
+        doc.metadata,
+        default_fidelity_mode="proof" if doc.source_docx else "draft",
+        source_docx_info=_document_source_docx_info(doc),
+        preview_state={
+            "hash": manifest.get("hash"),
+            "backend": manifest.get("backend"),
+            "page_count": manifest.get("page_count"),
+            "generated_at": manifest.get("generated_at"),
+        },
+    )
+    doc.save(update_fields=["metadata", "updated_at"])
+    return JsonResponse(manifest)
+
+
+@login_required
+@require_GET
+def proof_manifest(request, doc_id):
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    force = request.GET.get("force") in {"1", "true", "yes"}
+    try:
+        manifest = render_document_proof(doc, user=request.user, force=force)
+    except ProofRenderError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    return JsonResponse(manifest)
+
+
+@login_required
+@require_POST
+def set_document_style_source(request, doc_id, exemplar_id):
+    from .models import Exemplar
+
+    doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
+    exemplar = get_object_or_404(
+        Exemplar,
+        id=exemplar_id,
+        created_by=request.user,
+        is_active=True,
+    )
+    if not exemplar.original_file or not exemplar.original_file.name.lower().endswith(".docx"):
+        return JsonResponse({"error": "Only DOCX exemplars can be used as a style source."}, status=400)
+
+    metadata = normalize_document_metadata(
+        doc.metadata,
+        default_fidelity_mode="proof" if doc.source_docx else "draft",
+        source_docx_info=_document_source_docx_info(doc),
+    )
+    metadata["style_source_exemplar_id"] = exemplar.id
+    metadata["style_source_label"] = exemplar.title
+    doc.metadata = metadata
+    doc.save(update_fields=["metadata", "updated_at"])
+    return JsonResponse(
+        {
+            "status": "ok",
+            "metadata": doc.metadata,
+        }
+    )
 
 
 @login_required
@@ -355,3 +440,13 @@ def _version_payload(version, include_preview=False):
 
 def _extract_plain_text(content, max_chars=None):
     return extract_plain_text(content, max_chars=max_chars)
+
+
+def _document_source_docx_info(doc):
+    if not doc.source_docx:
+        return {}
+    return {
+        "filename": Path(doc.source_docx.name).name if "/" in doc.source_docx.name else doc.source_docx.name,
+        "url": doc.source_docx.url if hasattr(doc.source_docx, "url") else "",
+        "source": "document_source_docx",
+    }

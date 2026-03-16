@@ -1,12 +1,18 @@
 import json
+from pathlib import Path
 
 from django.contrib.auth.decorators import login_required
+from django.core.files import File
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
 
+from .document_schema import normalize_document_content, normalize_document_metadata
 from .exemplar_service import extract_text_from_file, generate_embedding, rank_exemplars
-from .models import Document, DocumentType, Exemplar
+from .import_service import import_docx_package
+from .models import Document, DocumentType, DocumentVersion, Exemplar
+from .proof_service import ProofRenderError, render_exemplar_preview
 from .style_anchor_service import extract_style_anchor_structure
 
 
@@ -27,8 +33,11 @@ def _serialize_exemplar(exemplar):
         "tags": exemplar.tags or [],
         "metadata": exemplar.metadata or {},
         "file_url": exemplar.original_file.url if exemplar.original_file else "",
+        "filename": Path(exemplar.original_file.name).name if exemplar.original_file else "",
         "snippet": text[:500],
         "updated_at": exemplar.updated_at.isoformat(),
+        "preview_url": reverse("exemplar_preview", kwargs={"exemplar_id": exemplar.id}),
+        "open_as_draft_url": reverse("exemplar_open_as_draft", kwargs={"exemplar_id": exemplar.id}),
     }
 
 
@@ -131,6 +140,78 @@ def exemplar_detail(request, exemplar_id):
 
 @login_required
 @require_GET
+def exemplar_preview(request, exemplar_id):
+    exemplar = get_object_or_404(Exemplar, id=exemplar_id, created_by=request.user)
+    force = request.GET.get("force") in {"1", "true", "yes"}
+    try:
+        manifest = render_exemplar_preview(exemplar, force=force)
+    except ProofRenderError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    manifest["open_as_draft_url"] = reverse("exemplar_open_as_draft", kwargs={"exemplar_id": exemplar.id})
+    return JsonResponse(manifest)
+
+
+@login_required
+@require_POST
+def exemplar_open_as_draft(request, exemplar_id):
+    exemplar = get_object_or_404(Exemplar, id=exemplar_id, created_by=request.user, is_active=True)
+    suffix = Path(exemplar.original_file.name or "").suffix.lower()
+
+    if suffix == ".docx":
+        with exemplar.original_file.open("rb") as handle:
+            package = import_docx_package(handle)
+        content = package["content"]
+        metadata = normalize_document_metadata(
+            package.get("metadata"),
+            default_fidelity_mode="proof",
+            source_docx_info={
+                "filename": Path(exemplar.original_file.name).name,
+                "source": "exemplar_clone",
+                "exemplar_id": exemplar.id,
+            },
+        )
+        metadata["fidelity_mode"] = "proof"
+        metadata["source_exemplar_id"] = exemplar.id
+        metadata["source_exemplar_title"] = exemplar.title
+        metadata["style_source_exemplar_id"] = exemplar.id
+        metadata["style_source_label"] = exemplar.title
+    else:
+        content = normalize_document_content(_text_to_document(exemplar.extracted_text or exemplar.title))
+        metadata = normalize_document_metadata(
+            {
+                "source_exemplar_id": exemplar.id,
+                "source_exemplar_title": exemplar.title,
+            },
+            default_fidelity_mode="draft",
+        )
+
+    document = Document(
+        title=f"{exemplar.title} Draft",
+        document_type=exemplar.document_type,
+        content=content,
+        metadata=metadata,
+        created_by=request.user,
+    )
+    if suffix == ".docx":
+        with exemplar.original_file.open("rb") as handle:
+            document.source_docx.save(Path(exemplar.original_file.name).name, File(handle), save=False)
+    document.save()
+    DocumentVersion.objects.create(
+        document=document,
+        content=document.content,
+        label="Opened from exemplar",
+    )
+    return JsonResponse(
+        {
+            "status": "ok",
+            "document_id": str(document.id),
+            "editor_url": reverse("editor", kwargs={"doc_id": document.id}),
+        }
+    )
+
+
+@login_required
+@require_GET
 def exemplar_suggest_for_document(request, doc_id):
     doc = get_object_or_404(Document, id=doc_id, created_by=request.user)
     qs = Exemplar.objects.filter(created_by=request.user)
@@ -144,3 +225,14 @@ def exemplar_suggest_for_document(request, doc_id):
     query_text = f"{doc.title}\n{json.dumps(doc.content)[:2000]}"
     ranked = rank_exemplars(query_text, exemplars)
     return JsonResponse({"results": ranked[:10]})
+
+
+def _text_to_document(text):
+    paragraphs = [line.strip() for line in (text or "").splitlines()]
+    content = []
+    for line in paragraphs:
+        if line:
+            content.append({"type": "paragraph", "content": [{"type": "text", "text": line}]})
+        else:
+            content.append({"type": "paragraph"})
+    return {"type": "doc", "content": content or [{"type": "paragraph"}]}

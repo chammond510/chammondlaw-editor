@@ -3,48 +3,99 @@
 
 {% block extra_head %}
 <style>
-    .tiptap-editor { outline: none; min-height: 60vh; font-family: 'Georgia', 'Times New Roman', serif; font-size: 16px; line-height: 1.8; color: #1a1a1a; }
+    :root {
+        --word-chrome: #f4f6fb;
+        --word-surface: #ffffff;
+        --word-border: #d4d8e5;
+        --word-ink: #1f2937;
+        --word-subtle: #6b7280;
+        --word-accent: #2455d6;
+        --word-accent-soft: #e8eefc;
+        --word-ribbon: #eef2fa;
+        --word-paper-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+    }
+    body { background: linear-gradient(180deg, #eef2f9 0%, #f7f8fc 18%, #eef1f7 100%); }
+    .word-header { background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(16px); }
+    .status-pill { display: inline-flex; align-items: center; gap: 0.35rem; border: 1px solid var(--word-border); border-radius: 999px; background: #fff; padding: 0.22rem 0.55rem; font-size: 11px; color: var(--word-subtle); }
+    .tiptap-editor { outline: none; min-height: 60vh; font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 1.35; color: var(--word-ink); }
     .tiptap-editor:focus { outline: none; }
-    .tiptap-editor h1 { font-size: 1.75em; font-weight: 700; margin: 1em 0 0.5em; color: #1B2A4A; }
-    .tiptap-editor h2 { font-size: 1.4em; font-weight: 700; margin: 1em 0 0.4em; color: #1B2A4A; }
-    .tiptap-editor h3 { font-size: 1.15em; font-weight: 700; margin: 0.8em 0 0.3em; color: #1B2A4A; }
-    .tiptap-editor p { margin: 0.4em 0; }
-    .tiptap-editor ul { list-style: disc; padding-left: 1.5em; margin: 0.5em 0; }
-    .tiptap-editor ol { list-style: decimal; padding-left: 1.5em; margin: 0.5em 0; }
-    .tiptap-editor blockquote { border-left: 3px solid #C5A55A; padding-left: 1em; margin: 0.8em 0; color: #555; }
-    .tiptap-editor hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
-    .tiptap-editor hr.page-break-node { border-top: 2px dashed #9ca3af; position: relative; margin: 2em 0; }
-    .tiptap-editor hr.page-break-node::after { content: 'Page Break'; position: absolute; right: 0; top: -10px; font-size: 11px; color: #6b7280; background: white; padding: 0 4px; }
+    .tiptap-editor h1,
+    .tiptap-editor h2,
+    .tiptap-editor h3 { font-weight: 700; margin: 12pt 0 6pt; color: var(--word-ink); }
+    .tiptap-editor h1 { font-size: 16pt; }
+    .tiptap-editor h2 { font-size: 14pt; }
+    .tiptap-editor h3 { font-size: 12pt; }
+    .tiptap-editor p { margin: 4pt 0; }
+    .tiptap-editor ul { list-style: disc; padding-left: 24pt; margin: 4pt 0; }
+    .tiptap-editor ol { list-style: decimal; padding-left: 24pt; margin: 4pt 0; }
+    .tiptap-editor blockquote { border-left: 2px solid #94a3b8; padding-left: 14pt; margin: 6pt 0; color: #475569; }
+    .tiptap-editor hr { border: none; border-top: 1px solid #d1d5db; margin: 10pt 0; }
+    .tiptap-editor hr.page-break-node { border-top: 2px dashed #94a3b8; position: relative; margin: 16pt 0; }
+    .tiptap-editor hr.page-break-node::after { content: 'Page Break'; position: absolute; right: 0; top: -10px; font-size: 11px; color: #64748b; background: var(--word-surface); padding: 0 4px; }
     .tiptap-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; color: #adb5bd; pointer-events: none; height: 0; }
-    .editor-link { color: #1B2A4A; text-decoration: underline; text-decoration-color: #C5A55A; text-underline-offset: 2px; }
+    .editor-link { color: #1d4ed8; text-decoration: underline; text-underline-offset: 2px; }
+    #ribbon { background: var(--word-surface); border-bottom: 1px solid var(--word-border); position: sticky; top: 0; z-index: 10; }
+    .ribbon-tabs { display: flex; align-items: center; gap: 0.35rem; padding: 0.45rem 1rem 0; background: var(--word-ribbon); border-bottom: 1px solid var(--word-border); }
+    .ribbon-tab { border: 1px solid transparent; border-radius: 0.6rem 0.6rem 0 0; background: transparent; color: #475569; font-size: 12px; font-weight: 600; padding: 0.5rem 0.8rem; }
+    .ribbon-tab:hover { color: var(--word-ink); background: rgba(255, 255, 255, 0.65); }
+    .ribbon-tab-active { background: var(--word-surface); border-color: var(--word-border); border-bottom-color: var(--word-surface); color: var(--word-accent); }
+    .layout-toggle { border: 1px solid var(--word-border); border-radius: 0.65rem; background: #fff; color: #334155; padding: 0.45rem 0.7rem; font-size: 12px; font-weight: 600; }
+    .layout-toggle-active { background: var(--word-accent-soft); color: var(--word-accent); border-color: #bfd0fb; }
     .toolbar-btn { transition: all 0.1s; }
-    .toolbar-btn:hover { background-color: #e5e7eb; }
-    .toolbar-btn.is-active { background-color: #1B2A4A; color: white; }
-    .toolbar-group { display: flex; align-items: center; gap: 0.25rem; border: 1px solid #e5e7eb; border-radius: 0.8rem; background: #fff; padding: 0.25rem 0.375rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
-    .toolbar-select { border: none; background: transparent; border-radius: 0.6rem; color: #374151; font-size: 0.75rem; line-height: 1rem; padding: 0.35rem 0.5rem; min-width: 9rem; }
-    .toolbar-select:focus { outline: none; box-shadow: 0 0 0 2px rgba(27, 42, 74, 0.12); }
-    .toolbar-divider { width: 1px; align-self: stretch; background: #e5e7eb; }
-    .footnote-ref-node { cursor: pointer; color: #1B2A4A; font-size: 0.85em; }
+    .toolbar-btn:hover { background-color: #e7ebf6; }
+    .toolbar-btn.is-active { background-color: var(--word-accent); color: white; }
+    .toolbar-group-shell { display: flex; flex-wrap: wrap; gap: 0.65rem; padding: 0.8rem 1rem; align-items: stretch; }
+    .toolbar-group { display: flex; align-items: center; gap: 0.25rem; border: 1px solid var(--word-border); border-radius: 0.8rem; background: #fff; padding: 0.3rem 0.45rem; min-height: 3.45rem; }
+    .toolbar-group[data-ribbon-panel] { display: none; }
+    .toolbar-group.toolbar-group-visible { display: flex; }
+    .toolbar-group-title { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #64748b; margin-top: 0.35rem; }
+    .toolbar-select { border: none; background: transparent; border-radius: 0.6rem; color: #334155; font-size: 0.75rem; line-height: 1rem; padding: 0.35rem 0.5rem; min-width: 9rem; }
+    .toolbar-select:focus { outline: none; box-shadow: 0 0 0 2px rgba(36, 85, 214, 0.12); }
+    .footnote-ref-node { cursor: pointer; color: #1d4ed8; font-size: 0.85em; }
     .footnote-ref-node:hover { text-decoration: underline; }
     .research-open #research-sidebar { width: 420px; opacity: 1; }
     #research-sidebar { width: 0; opacity: 0; transition: width 0.2s ease, opacity 0.2s ease; position: relative; }
     #outline-sidebar { width: 280px; opacity: 1; transition: width 0.2s ease, opacity 0.2s ease; }
     #editor-shell.outline-hidden #outline-sidebar { width: 0; opacity: 0; border-right-width: 0; }
     #editor-shell.outline-hidden #outline-sidebar > * { display: none; }
+    body.proof-layout #outline-sidebar,
+    body.proof-layout #draft-layout-area { display: none !important; }
+    body.proof-layout #proof-layout-area { display: block !important; }
     .outline-item { display: block; width: 100%; border: 1px solid transparent; border-radius: 0.85rem; padding: 0.7rem 0.85rem; text-align: left; transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
     .outline-item:hover { background: #f8fafc; border-color: #e2e8f0; }
-    .outline-item-active { background: #1B2A4A; border-color: #1B2A4A; color: white; box-shadow: 0 12px 24px rgba(27, 42, 74, 0.12); }
+    .outline-item-active { background: var(--word-accent); border-color: var(--word-accent); color: white; box-shadow: 0 12px 24px rgba(36, 85, 214, 0.18); }
     .outline-item-active .outline-kicker,
     .outline-item-active .outline-meta { color: rgba(255, 255, 255, 0.75); }
-    .editor-paper { box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }
+    .editor-main-scroll { overflow-y: auto; }
+    .editor-paper { box-shadow: var(--word-paper-shadow); width: min(100%, 8.5in); min-height: 11in; margin: 0 auto; border-radius: 0.2rem; border: 1px solid #d8dce8; background: #fff; position: relative; }
+    .editor-paper-inner { padding: 1in; }
+    .draft-ruler { width: min(100%, 8.5in); margin: 0 auto 0.9rem; border: 1px solid var(--word-border); border-radius: 0.25rem; background: linear-gradient(180deg, #fcfdff 0%, #f5f7fb 100%); display: grid; grid-template-columns: repeat(8, 1fr); overflow: hidden; }
+    .ruler-segment { position: relative; padding: 0.45rem 0 0.65rem; text-align: center; font-size: 11px; color: #64748b; border-right: 1px solid #e2e8f0; }
+    .ruler-segment:last-child { border-right: none; }
+    .ruler-segment::after { content: ''; position: absolute; left: 50%; bottom: 0.15rem; width: 1px; height: 0.65rem; background: #94a3b8; }
+    #proof-layout-area { display: none; }
+    .proof-workspace { display: grid; grid-template-columns: 260px minmax(0, 1fr) 320px; gap: 1rem; min-height: calc(100vh - 260px); }
+    .proof-panel { border: 1px solid var(--word-border); border-radius: 1rem; background: rgba(255, 255, 255, 0.92); box-shadow: 0 12px 24px rgba(15, 23, 42, 0.06); overflow: hidden; }
+    .proof-panel-header { padding: 0.9rem 1rem; border-bottom: 1px solid var(--word-border); background: linear-gradient(180deg, #fbfcff 0%, #f5f7fb 100%); }
+    .proof-block-list { max-height: calc(100vh - 360px); overflow-y: auto; padding: 0.8rem; }
+    .proof-block-card { width: 100%; text-align: left; border: 1px solid var(--word-border); border-radius: 0.85rem; background: #fff; padding: 0.8rem; margin-bottom: 0.6rem; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+    .proof-block-card:hover { border-color: #b9c7ef; box-shadow: 0 10px 22px rgba(36, 85, 214, 0.08); }
+    .proof-block-card-active { border-color: var(--word-accent); box-shadow: 0 12px 26px rgba(36, 85, 214, 0.14); }
+    .proof-preview-scroll { max-height: calc(100vh - 320px); overflow-y: auto; padding: 1rem; background: linear-gradient(180deg, #edf1f9 0%, #f5f7fb 100%); }
+    .proof-preview-page { display: block; width: min(100%, 900px); margin: 0 auto 1rem; border: 1px solid #d8dce8; background: #fff; box-shadow: 0 18px 36px rgba(15, 23, 42, 0.1); }
+    .proof-preview-image { display: block; width: 100%; height: auto; }
+    .proof-empty { color: var(--word-subtle); font-size: 13px; padding: 1rem; }
+    .proof-drawer-body { padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+    .proof-textarea { width: 100%; min-height: 220px; border: 1px solid var(--word-border); border-radius: 0.8rem; padding: 0.8rem 0.9rem; font: 12pt/1.35 'Times New Roman', Times, serif; color: var(--word-ink); resize: vertical; background: #fff; }
+    .proof-textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(36, 85, 214, 0.14); border-color: #bfd0fb; }
     #editor-statusbar { backdrop-filter: blur(12px); }
-    .tab-btn-active { background-color: #1B2A4A; color: white; }
+    .tab-btn-active { background-color: var(--word-accent); color: white; }
     .slash-item-active { background-color: #eef2ff; border-color: #c7d2fe; }
-    .version-item-active { border-color: #1B2A4A; background: #f8fafc; }
+    .version-item-active { border-color: var(--word-accent); background: #f8fafc; }
     .diff-line-added { background: #ecfdf5; color: #166534; display: block; padding: 1px 4px; border-radius: 4px; }
     .diff-line-removed { background: #fef2f2; color: #991b1b; display: block; padding: 1px 4px; border-radius: 4px; }
     .diff-line-same { color: #6b7280; display: block; padding: 1px 4px; }
-    body.focus-mode #toolbar,
+    body.focus-mode #ribbon,
     body.focus-mode #outline-sidebar,
     body.focus-mode #editor-statusbar,
     body.focus-mode #research-sidebar { display: none !important; }
@@ -54,12 +105,13 @@
         #outline-sidebar { display: none !important; }
         .outline-toggle-only { display: none !important; }
         #editor-shell { height: auto; min-height: calc(100vh - 180px); }
+        .proof-workspace { grid-template-columns: 1fr; }
     }
 </style>
 {% endblock %}
 
 {% block body %}
-<div class="bg-white border-b border-gray-200 px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+<div class="word-header border-b border-gray-200 px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
     <div class="flex items-start gap-3 min-w-0">
         <a href="{% url 'dashboard' %}" class="text-gray-400 hover:text-gray-600 transition-colors mt-1" title="Back to documents">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
@@ -68,77 +120,118 @@
             <input type="text" id="doc-title" value="{{ document.title }}" class="text-lg font-semibold text-gray-900 border-none focus:outline-none focus:ring-0 bg-transparent w-full max-w-3xl" placeholder="Untitled Document">
             <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
                 {% if document.document_type %}
-                <span class="inline-flex items-center rounded-full border border-navy/10 bg-navy/5 px-2 py-0.5 text-navy">{{ document.document_type.name }}</span>
+                <span class="status-pill">{{ document.document_type.name }}</span>
                 {% endif %}
-                <span id="doc-stats-inline">0 words · 0 est. pages</span>
-                <span id="doc-context-inline">No selection</span>
+                <span class="status-pill" id="layout-mode-indicator">Draft Layout</span>
+                <span class="status-pill" id="doc-stats-inline">0 words · 0 est. pages</span>
+                <span class="status-pill" id="doc-context-inline">No selection</span>
+                <span class="status-pill" id="current-style-source">Default style source</span>
             </div>
         </div>
     </div>
     <div class="flex flex-wrap items-center justify-end gap-2">
         <span id="save-status" class="text-xs text-gray-400">Saved</span>
         <button id="outline-toggle" class="outline-toggle-only border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Hide Outline</button>
-        <button id="focus-toggle" class="border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Focus</button>
-        <button id="open-versions" class="border border-gray-300 px-3 py-1.5 rounded text-sm hover:bg-gray-50">Versions</button>
         <a href="{% url 'export_docx' document.id %}" class="bg-navy text-white px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">Word</a>
         <a href="{% url 'export_pdf' document.id %}" class="bg-gold text-navy px-3 py-1.5 rounded text-sm hover:bg-opacity-90 transition-colors">PDF</a>
     </div>
 </div>
 
-<div id="toolbar" class="bg-white border-b border-gray-100 px-4 py-2 flex items-center gap-2 flex-wrap sticky top-0 z-10">
-    <div class="toolbar-group">
-        <select id="block-style-select" class="toolbar-select" aria-label="Block style">
-            <option value="paragraph">Paragraph</option>
-            <option value="heading-1">Heading 1</option>
-            <option value="heading-2">Heading 2</option>
-            <option value="heading-3">Heading 3</option>
-            <option value="blockquote">Block Quote</option>
-        </select>
+<div id="ribbon">
+    <div class="ribbon-tabs">
+        <button class="ribbon-tab ribbon-tab-active" data-ribbon-tab="home">Home</button>
+        <button class="ribbon-tab" data-ribbon-tab="insert">Insert</button>
+        <button class="ribbon-tab" data-ribbon-tab="layout">Layout</button>
+        <button class="ribbon-tab" data-ribbon-tab="review">Review</button>
+        <button class="ribbon-tab" data-ribbon-tab="references">References</button>
+        <div class="flex-grow"></div>
+        <button id="layout-mode-draft" class="layout-toggle">Draft Layout</button>
+        <button id="layout-mode-proof" class="layout-toggle">Proof Layout</button>
     </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded" data-action="bold">B</button>
-        <button class="toolbar-btn p-1.5 rounded italic" data-action="italic">I</button>
-        <button class="toolbar-btn p-1.5 rounded underline" data-action="underline">U</button>
-        <button class="toolbar-btn px-2 py-1 rounded text-xs" data-action="clearFormatting">Clear</button>
+    <div id="toolbar" class="toolbar-group-shell">
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group toolbar-group-visible" data-ribbon-panel="home">
+                <select id="block-style-select" class="toolbar-select" aria-label="Block style">
+                    <option value="paragraph">Paragraph</option>
+                    <option value="heading-1">Heading 1</option>
+                    <option value="heading-2">Heading 2</option>
+                    <option value="heading-3">Heading 3</option>
+                    <option value="blockquote">Block Quote</option>
+                </select>
+            </div>
+            <div class="toolbar-group-title">Styles</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group toolbar-group-visible" data-ribbon-panel="home">
+                <button class="toolbar-btn p-1.5 rounded" data-action="bold">B</button>
+                <button class="toolbar-btn p-1.5 rounded italic" data-action="italic">I</button>
+                <button class="toolbar-btn p-1.5 rounded underline" data-action="underline">U</button>
+                <button class="toolbar-btn px-2 py-1 rounded text-xs" data-action="clearFormatting">Clear</button>
+            </div>
+            <div class="toolbar-group-title">Font</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group toolbar-group-visible" data-ribbon-panel="home">
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="left">Left</button>
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="center">Center</button>
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="right">Right</button>
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="justify">Justify</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="bulletList">List</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="orderedList">Numbered</button>
+            </div>
+            <div class="toolbar-group-title">Paragraph</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group" data-ribbon-panel="insert">
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="setLink">Link</button>
+                <button class="toolbar-btn p-1.5 rounded text-xs" data-action="unsetLink">Unlink</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
+            </div>
+            <div class="toolbar-group-title">Text</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group" data-ribbon-panel="insert">
+                <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="deleteRow">-Row</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="deleteColumn">-Col</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="mergeCells">Merge</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="splitCell">Split</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderRow">Hdr Row</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderColumn">Hdr Col</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
+            </div>
+            <div class="toolbar-group-title">Tables</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group" data-ribbon-panel="layout">
+                <button id="zoom-out" class="toolbar-btn px-2 py-1 rounded text-xs">- Zoom</button>
+                <span id="zoom-label" class="px-1 text-xs text-gray-600">100%</span>
+                <button id="zoom-in" class="toolbar-btn px-2 py-1 rounded text-xs">+ Zoom</button>
+                <button id="proof-refresh" class="toolbar-btn px-2 py-1 rounded text-xs">Refresh Preview</button>
+            </div>
+            <div class="toolbar-group-title">View</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group" data-ribbon-panel="review">
+                <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
+                <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
+                <button id="open-footnotes" class="toolbar-btn px-2 py-1 rounded text-xs">Manage Notes</button>
+                <button id="open-versions" class="toolbar-btn px-2 py-1 rounded text-xs">Versions</button>
+                <button id="focus-toggle" class="toolbar-btn px-2 py-1 rounded text-xs">Focus</button>
+            </div>
+            <div class="toolbar-group-title">Review</div>
+        </div>
+        <div class="flex flex-col gap-1">
+            <div class="toolbar-group" data-ribbon-panel="references">
+                <button id="research-toggle" class="toolbar-btn px-2 py-1 rounded text-xs">Research Pane</button>
+                <button id="run-exemplar-suggest-ribbon" class="toolbar-btn px-2 py-1 rounded text-xs">Suggest Exemplars</button>
+            </div>
+            <div class="toolbar-group-title">References</div>
+        </div>
     </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="left">Left</button>
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="center">Center</button>
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="right">Right</button>
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="align" data-align="justify">Justify</button>
-    </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="setLink">Link</button>
-        <button class="toolbar-btn p-1.5 rounded text-xs" data-action="unsetLink">Unlink</button>
-    </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded" data-action="bulletList">List</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="orderedList">Numbered</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="blockquote">Quote</button>
-    </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded" data-action="insertTable">Table</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="addRow">+Row</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="deleteRow">-Row</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="addColumn">+Col</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="deleteColumn">-Col</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="mergeCells">Merge</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="splitCell">Split</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderRow">Hdr Row</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="toggleHeaderColumn">Hdr Col</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="deleteTable">Del Table</button>
-    </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded" data-action="footnote">Footnote</button>
-        <button id="open-footnotes" class="p-1.5 rounded border border-gray-300 text-xs">Manage Notes</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="pageBreak">Page Break</button>
-    </div>
-    <div class="toolbar-group">
-        <button class="toolbar-btn p-1.5 rounded" data-action="undo">Undo</button>
-        <button class="toolbar-btn p-1.5 rounded" data-action="redo">Redo</button>
-    </div>
-    <div class="flex-grow"></div>
-    <button id="research-toggle" class="bg-navy text-white px-3 py-1.5 rounded text-xs hover:bg-opacity-90">Research Agent</button>
 </div>
 
 <div id="editor-shell" class="flex h-[calc(100vh-136px)] overflow-hidden">
@@ -152,10 +245,54 @@
     </aside>
 
     <div id="editor-main" class="flex-1 min-w-0 flex flex-col">
-        <div class="flex-1 overflow-y-auto">
-            <div class="max-w-4xl mx-auto px-6 py-8">
-                <div class="editor-paper bg-white rounded-xl border border-gray-200 px-12 py-10 min-h-[70vh]">
-                    <div id="editor" class="tiptap-editor"></div>
+        <div class="flex-1 editor-main-scroll">
+            <div id="draft-layout-area" class="px-6 py-8">
+                <div id="draft-ruler" class="draft-ruler"></div>
+                <div class="editor-paper">
+                    <div class="editor-paper-inner">
+                        <div id="editor" class="tiptap-editor"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="proof-layout-area" class="px-4 py-4">
+                <div class="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-gray-200 bg-white/90 px-4 py-3">
+                    <div>
+                        <div class="text-sm font-semibold text-gray-900">Proof Layout</div>
+                        <div class="text-xs text-gray-500">This preview is generated from the same Word document used for export.</div>
+                    </div>
+                    <div id="proof-status" class="text-xs text-gray-500">Preview not loaded yet.</div>
+                </div>
+                <div class="proof-workspace">
+                    <div class="proof-panel">
+                        <div class="proof-panel-header">
+                            <div class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Blocks</div>
+                            <div class="mt-1 text-sm font-semibold text-gray-900">Focused edit targets</div>
+                        </div>
+                        <div id="proof-block-list" class="proof-block-list"></div>
+                    </div>
+                    <div class="proof-panel">
+                        <div class="proof-panel-header">
+                            <div class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Word Preview</div>
+                            <div class="mt-1 text-sm font-semibold text-gray-900">Exact export proof</div>
+                        </div>
+                        <div id="proof-preview" class="proof-preview-scroll">
+                            <div class="proof-empty">Switch to Proof Layout and refresh to generate the live Word preview.</div>
+                        </div>
+                    </div>
+                    <div class="proof-panel">
+                        <div class="proof-panel-header">
+                            <div class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500">Focused Edit</div>
+                            <div id="proof-block-label" class="mt-1 text-sm font-semibold text-gray-900">No block selected</div>
+                        </div>
+                        <div class="proof-drawer-body">
+                            <div id="proof-block-meta" class="text-xs text-gray-500">Choose a paragraph, heading, list, or table block to edit it without leaving Proof Layout.</div>
+                            <textarea id="proof-block-input" class="proof-textarea" placeholder="Select a block from the left."></textarea>
+                            <div class="flex items-center justify-between gap-2">
+                                <span id="proof-block-status" class="text-xs text-gray-500">Changes apply to the document model immediately.</span>
+                                <button id="proof-block-save" class="bg-navy text-white px-3 py-1.5 rounded text-xs">Apply Block Edit</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -408,6 +545,7 @@
 </div>
 
 {{ document.content|json_script:"initial-doc-content" }}
+{{ document.metadata|json_script:"initial-doc-metadata" }}
 {% endblock %}
 
 {% block extra_scripts %}
@@ -425,7 +563,7 @@
   "@tiptap/extension-superscript":"https://esm.sh/@tiptap/extension-superscript@2.11.5"
 }}</script>
 <script type="module">
-import { Editor, Node } from '@tiptap/core';
+import { Editor, Extension, Mark, Node } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
@@ -436,6 +574,9 @@ import TableRow from '@tiptap/extension-table-row';
 import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
 import Superscript from '@tiptap/extension-superscript';
+import * as pdfjsLib from 'https://esm.sh/pdfjs-dist@4.8.69/build/pdf.mjs';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.8.69/build/pdf.worker.mjs';
 
 const docId = '{{ document.id }}';
 const csrfToken = '{{ csrf_token }}';
@@ -454,12 +595,99 @@ let lastEditSelection = null;
 let focusModeEnabled = false;
 let outlineVisible = true;
 let outlineItems = [];
+let documentMetadata = {};
+let currentLayoutMode = 'draft';
+let proofManifest = null;
+let proofRefreshing = false;
+let proofZoom = 1;
+let activeProofBlockId = '';
+let pendingProofRefresh = false;
 let slashState = {
   open: false,
   items: [],
   selectedIndex: 0,
   range: null,
 };
+
+function stringifyDataAttr(value) {
+  if (value === null || value === undefined || value === '' || value === false) return null;
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function parseDataAttr(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+const WordBlockMetadata = Extension.create({
+  name: 'wordBlockMetadata',
+  addGlobalAttributes() {
+    return [
+      {
+        types: ['paragraph', 'heading', 'bulletList', 'orderedList', 'table', 'blockquote'],
+        attributes: {
+          block_id: {
+            default: null,
+            parseHTML: element => element.getAttribute('data-block-id') || null,
+            renderHTML: attributes => attributes.block_id ? { 'data-block-id': attributes.block_id } : {},
+          },
+          word_style: {
+            default: null,
+            parseHTML: element => parseDataAttr(element.getAttribute('data-word-style')),
+            renderHTML: attributes => {
+              const value = stringifyDataAttr(attributes.word_style);
+              return value ? { 'data-word-style': value } : {};
+            },
+          },
+          paragraph_metrics: {
+            default: null,
+            parseHTML: element => parseDataAttr(element.getAttribute('data-paragraph-metrics')),
+            renderHTML: attributes => {
+              const value = stringifyDataAttr(attributes.paragraph_metrics);
+              return value ? { 'data-paragraph-metrics': value } : {};
+            },
+          },
+          list_identity: {
+            default: null,
+            parseHTML: element => parseDataAttr(element.getAttribute('data-list-identity')),
+            renderHTML: attributes => {
+              const value = stringifyDataAttr(attributes.list_identity);
+              return value ? { 'data-list-identity': value } : {};
+            },
+          },
+        },
+      },
+    ];
+  },
+});
+
+const WordRun = Mark.create({
+  name: 'wordRun',
+  inclusive: false,
+  addAttributes() {
+    return {
+      run_metrics: {
+        default: null,
+        parseHTML: element => parseDataAttr(element.getAttribute('data-run-metrics')),
+        renderHTML: attributes => {
+          const value = stringifyDataAttr(attributes.run_metrics);
+          return value ? { 'data-word-run': 'true', 'data-run-metrics': value } : {};
+        },
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span[data-word-run]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', HTMLAttributes, 0];
+  },
+});
 
 const PageBreak = Node.create({
   name: 'pageBreak',
@@ -505,11 +733,19 @@ try {
 } catch {
   initialContent = { type: 'doc', content: [{ type: 'paragraph' }] };
 }
+try {
+  documentMetadata = JSON.parse(document.getElementById('initial-doc-metadata').textContent) || {};
+} catch {
+  documentMetadata = {};
+}
+currentLayoutMode = documentMetadata.fidelity_mode === 'proof' ? 'proof' : 'draft';
 
 const editor = new Editor({
   element: document.getElementById('editor'),
   extensions: [
     StarterKit,
+    WordBlockMetadata,
+    WordRun,
     Underline,
     Link.configure({
       openOnClick: false,
@@ -543,6 +779,60 @@ const editorShell = document.getElementById('editor-shell');
 const blockStyleSelect = document.getElementById('block-style-select');
 const focusToggle = document.getElementById('focus-toggle');
 const outlineToggle = document.getElementById('outline-toggle');
+const draftRuler = document.getElementById('draft-ruler');
+const layoutModeDraftButton = document.getElementById('layout-mode-draft');
+const layoutModeProofButton = document.getElementById('layout-mode-proof');
+const layoutModeIndicator = document.getElementById('layout-mode-indicator');
+const currentStyleSourceNode = document.getElementById('current-style-source');
+const proofPreviewNode = document.getElementById('proof-preview');
+const proofStatusNode = document.getElementById('proof-status');
+const proofBlockListNode = document.getElementById('proof-block-list');
+const proofBlockLabelNode = document.getElementById('proof-block-label');
+const proofBlockMetaNode = document.getElementById('proof-block-meta');
+const proofBlockInput = document.getElementById('proof-block-input');
+const proofBlockSaveButton = document.getElementById('proof-block-save');
+const proofBlockStatusNode = document.getElementById('proof-block-status');
+const proofRefreshButton = document.getElementById('proof-refresh');
+const zoomLabel = document.getElementById('zoom-label');
+const zoomInButton = document.getElementById('zoom-in');
+const zoomOutButton = document.getElementById('zoom-out');
+
+function renderRuler() {
+  draftRuler.innerHTML = Array.from({ length: 8 }, (_, index) => `<div class="ruler-segment">${index + 1}</div>`).join('');
+}
+
+function describeLayoutMode(mode) {
+  return mode === 'proof' ? 'Proof Layout' : 'Draft Layout';
+}
+
+function updateStyleSourceBadge() {
+  const label = documentMetadata.style_source_label || documentMetadata.source_exemplar_title || 'Default style source';
+  currentStyleSourceNode.textContent = label;
+}
+
+function setLayoutMode(mode, { persist = true, loadProof = true } = {}) {
+  currentLayoutMode = mode === 'proof' ? 'proof' : 'draft';
+  documentMetadata.fidelity_mode = currentLayoutMode;
+  document.body.classList.toggle('proof-layout', currentLayoutMode === 'proof');
+  layoutModeDraftButton.classList.toggle('layout-toggle-active', currentLayoutMode === 'draft');
+  layoutModeProofButton.classList.toggle('layout-toggle-active', currentLayoutMode === 'proof');
+  layoutModeIndicator.textContent = describeLayoutMode(currentLayoutMode);
+  if (currentLayoutMode === 'proof' && loadProof) {
+    refreshProofManifest(false);
+  }
+  if (persist) {
+    scheduleSave();
+  }
+}
+
+function setRibbonTab(tabName) {
+  document.querySelectorAll('.ribbon-tab').forEach(tab => {
+    tab.classList.toggle('ribbon-tab-active', tab.dataset.ribbonTab === tabName);
+  });
+  document.querySelectorAll('.toolbar-group[data-ribbon-panel]').forEach(group => {
+    group.classList.toggle('toolbar-group-visible', group.dataset.ribbonPanel === tabName || (tabName === 'home' && group.dataset.ribbonPanel === 'home'));
+  });
+}
 
 function countWords(text = '') {
   const normalized = (text || '').trim();
@@ -575,6 +865,213 @@ function setLinkFromPrompt() {
   }
   editor.chain().focus().extendMarkRange('link').setLink({ href: clean }).run();
   updateToolbar();
+}
+
+function blockNodeText(node) {
+  if (!node || typeof node !== 'object') return '';
+  if (node.type === 'text') return node.text || '';
+  if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'pageBreak') return '\n--- page break ---\n';
+  return (node.content || []).map(blockNodeText).join('');
+}
+
+function blockEditorText(node) {
+  if (!node || typeof node !== 'object') return '';
+  if (node.type === 'bulletList' || node.type === 'orderedList') {
+    return (node.content || []).map(item => blockNodeText(item).trim()).filter(Boolean).join('\n');
+  }
+  if (node.type === 'table') {
+    return (node.content || []).map(row => (row.content || []).map(cell => blockNodeText(cell).replace(/\n+/g, ' ').trim()).join('\t')).join('\n');
+  }
+  return blockNodeText(node);
+}
+
+function textToInlineContent(text) {
+  if (!text) return [];
+  const lines = String(text).split('\n');
+  const content = [];
+  lines.forEach((line, index) => {
+    if (line) content.push({ type: 'text', text: line });
+    if (index < lines.length - 1) content.push({ type: 'hardBreak' });
+  });
+  return content;
+}
+
+function replaceProofBlockText(content, blockId, text) {
+  const doc = structuredClone(content || { type: 'doc', content: [] });
+  doc.content = (doc.content || []).map(node => {
+    if ((node.attrs || {}).block_id !== blockId) return node;
+    if (node.type === 'bulletList' || node.type === 'orderedList') {
+      const lines = String(text).split('\n').map(line => line.trim()).filter(Boolean);
+      return {
+        ...node,
+        content: lines.length ? lines.map(line => ({
+          type: 'listItem',
+          content: [{ type: 'paragraph', content: textToInlineContent(line) }],
+        })) : [{ type: 'listItem', content: [{ type: 'paragraph' }] }],
+      };
+    }
+    if (node.type === 'table') {
+      const rows = String(text).split('\n').filter(line => line.trim()).map(line => ({
+        type: 'tableRow',
+        content: line.split('\t').map(cell => ({
+          type: 'tableCell',
+          content: [{ type: 'paragraph', content: textToInlineContent(cell.trim()) }],
+        })),
+      }));
+      return {
+        ...node,
+        content: rows.length ? rows : [{ type: 'tableRow', content: [{ type: 'tableCell', content: [{ type: 'paragraph' }] }] }],
+      };
+    }
+    return {
+      ...node,
+      content: textToInlineContent(text),
+    };
+  });
+  return doc;
+}
+
+function getProofBlocks() {
+  const json = editor.getJSON();
+  return (json.content || []).map((node, index) => ({
+    index,
+    node,
+    block_id: (node.attrs || {}).block_id || `block-${index + 1}`,
+    type: node.type || 'paragraph',
+    text: blockEditorText(node).trim(),
+  }));
+}
+
+function blockTypeLabel(type) {
+  if (type === 'heading') return 'Heading';
+  if (type === 'bulletList') return 'Bulleted List';
+  if (type === 'orderedList') return 'Numbered List';
+  if (type === 'table') return 'Table';
+  if (type === 'blockquote') return 'Block Quote';
+  return 'Paragraph';
+}
+
+function renderProofBlockList() {
+  const blocks = getProofBlocks();
+  proofBlockListNode.innerHTML = blocks.length ? blocks.map(block => `
+    <button class="proof-block-card ${activeProofBlockId === block.block_id ? 'proof-block-card-active' : ''}" data-block-id="${block.block_id}">
+      <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">${blockTypeLabel(block.type)}</div>
+      <div class="mt-2 text-sm font-semibold text-gray-900">${escapeHtml((block.text || '(empty)').slice(0, 96))}</div>
+      <div class="mt-2 text-xs text-gray-500">Block ${block.index + 1}</div>
+    </button>
+  `).join('') : '<div class="proof-empty">No document blocks available.</div>';
+  proofBlockListNode.querySelectorAll('[data-block-id]').forEach(button => {
+    button.addEventListener('click', () => selectProofBlock(button.dataset.blockId));
+  });
+}
+
+function selectProofBlock(blockId) {
+  activeProofBlockId = blockId || '';
+  const block = getProofBlocks().find(item => item.block_id === activeProofBlockId);
+  if (!block) {
+    proofBlockLabelNode.textContent = 'No block selected';
+    proofBlockMetaNode.textContent = 'Choose a paragraph, heading, list, or table block to edit it without leaving Proof Layout.';
+    proofBlockInput.value = '';
+    renderProofBlockList();
+    return;
+  }
+  proofBlockLabelNode.textContent = `${blockTypeLabel(block.type)} ${block.index + 1}`;
+  proofBlockMetaNode.textContent = `${block.text.length} characters in this block.`;
+  proofBlockInput.value = blockEditorText(block.node);
+  renderProofBlockList();
+}
+
+function setProofStatus(message, tone = 'neutral') {
+  proofStatusNode.textContent = message;
+  proofStatusNode.classList.remove('text-gray-500', 'text-red-700', 'text-green-700');
+  proofStatusNode.classList.add(tone === 'error' ? 'text-red-700' : tone === 'success' ? 'text-green-700' : 'text-gray-500');
+}
+
+function updateZoomLabel() {
+  zoomLabel.textContent = `${Math.round(proofZoom * 100)}%`;
+}
+
+function renderProofFallbackImages(manifest) {
+  proofPreviewNode.innerHTML = (manifest.pages || []).length
+    ? (manifest.pages || []).map(page => `
+        <div class="proof-preview-page" style="transform: scale(${proofZoom}); transform-origin: top center;">
+          <img class="proof-preview-image" src="${page.image_url}" alt="Preview page ${page.index}">
+        </div>
+      `).join('')
+    : '<div class="proof-empty">No proof preview pages were generated.</div>';
+}
+
+async function renderProofManifest(manifest) {
+  if (!manifest || !manifest.pdf_url) {
+    proofPreviewNode.innerHTML = '<div class="proof-empty">Preview unavailable.</div>';
+    return;
+  }
+  proofPreviewNode.innerHTML = '<div class="proof-empty">Rendering Word preview...</div>';
+  try {
+    const pdf = await pdfjsLib.getDocument(manifest.pdf_url).promise;
+    proofPreviewNode.innerHTML = '';
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1.15 * proofZoom });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.className = 'proof-preview-image';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'proof-preview-page';
+      wrapper.appendChild(canvas);
+      proofPreviewNode.appendChild(wrapper);
+      await page.render({ canvasContext: context, viewport }).promise;
+    }
+  } catch (error) {
+    renderProofFallbackImages(manifest);
+  }
+}
+
+async function refreshProofManifest(force = true) {
+  if (proofRefreshing) return;
+  proofRefreshing = true;
+  setProofStatus(force ? 'Refreshing Word proof preview...' : 'Loading Word proof preview...');
+  try {
+    const url = force ? `/api/documents/${docId}/proof-refresh/` : `/api/documents/${docId}/proof-manifest/`;
+    const options = force
+      ? { method: 'POST', headers: { 'X-CSRFToken': csrfToken } }
+      : { method: 'GET' };
+    const res = await fetch(url, options);
+    const data = await readApiPayload(res);
+    if (!res.ok) {
+      throw new Error(data.error || 'Unable to generate the proof preview.');
+    }
+    proofManifest = data;
+    documentMetadata.preview_state = {
+      hash: data.hash,
+      backend: data.backend,
+      page_count: data.page_count,
+      generated_at: data.generated_at,
+    };
+    setProofStatus(`Preview ready • ${data.page_count || 0} page${data.page_count === 1 ? '' : 's'} • ${data.backend || 'renderer'}`, 'success');
+    await renderProofManifest(data);
+  } catch (error) {
+    setProofStatus(error?.message || 'Unable to generate the proof preview.', 'error');
+    proofPreviewNode.innerHTML = '<div class="proof-empty">Preview unavailable.</div>';
+  } finally {
+    proofRefreshing = false;
+  }
+}
+
+function applyProofBlockEdit() {
+  if (!activeProofBlockId) {
+    proofBlockStatusNode.textContent = 'Select a block first.';
+    return;
+  }
+  const updated = replaceProofBlockText(editor.getJSON(), activeProofBlockId, proofBlockInput.value);
+  editor.commands.setContent(updated);
+  proofBlockStatusNode.textContent = 'Block updated. Saving...';
+  pendingProofRefresh = currentLayoutMode === 'proof';
+  scheduleSave({ forceProofRefresh: pendingProofRefresh });
+  selectProofBlock(activeProofBlockId);
 }
 
 function collectHeadings() {
@@ -704,7 +1201,7 @@ function updateDocumentChrome() {
   const text = editor.getText() || '';
   const words = countWords(text);
   const chars = text.length;
-  const pages = estimatePages(words);
+  const pages = (proofManifest && proofManifest.page_count) || estimatePages(words);
   const headings = outlineItems.length;
   const footnotes = collectFootnotes().length;
   const selection = getLiveSelectionSnapshot();
@@ -723,6 +1220,7 @@ function updateDocumentChrome() {
   document.getElementById('selection-stats').textContent = selection.text
     ? `${selectedWords} word${selectedWords === 1 ? '' : 's'} selected`
     : (activeItem ? `Current section: ${activeItem.text}` : 'Cursor at top of document');
+  updateStyleSourceBadge();
 }
 
 async function saveContent(opts = {}) {
@@ -735,10 +1233,19 @@ async function saveContent(opts = {}) {
       headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
       body: JSON.stringify({
         content: editor.getJSON(),
+        metadata: documentMetadata,
         force_snapshot: !!opts.forceSnapshot,
         snapshot_label: opts.snapshotLabel || '',
       }),
     });
+    const payload = await readApiPayload(response);
+    if (response.ok && payload.metadata) {
+      documentMetadata = payload.metadata;
+      if (opts.forceProofRefresh || pendingProofRefresh) {
+        pendingProofRefresh = false;
+        refreshProofManifest(true);
+      }
+    }
     saveStatus.textContent = response.ok ? 'Saved' : 'Error saving';
   } catch {
     saveStatus.textContent = 'Error saving';
@@ -746,12 +1253,17 @@ async function saveContent(opts = {}) {
   isSaving = false;
 }
 
-editor.on('update', () => {
-  normalizeFootnotes();
+function scheduleSave(opts = {}) {
   clearTimeout(saveTimeout);
   saveStatus.textContent = 'Unsaved changes';
-  saveTimeout = setTimeout(() => saveContent(), 3000);
+  saveTimeout = setTimeout(() => saveContent(opts), 1200);
+}
+
+editor.on('update', () => {
+  normalizeFootnotes();
+  scheduleSave();
   renderOutline();
+  renderProofBlockList();
   updateDocumentChrome();
   updateToolbar();
   maybeOpenSlashMenu();
@@ -782,6 +1294,7 @@ editor.on('selectionUpdate', () => {
     clearRememberedEditSelection();
   }
   updateOutlineActiveState();
+  renderProofBlockList();
   updateDocumentChrome();
   updateToolbar();
   maybeOpenSlashMenu();
@@ -805,6 +1318,23 @@ document.getElementById('doc-title').addEventListener('input', (() => {
 blockStyleSelect.addEventListener('change', (e) => applyBlockStyle(e.target.value));
 focusToggle.addEventListener('click', () => setFocusMode(!focusModeEnabled));
 outlineToggle.addEventListener('click', () => setOutlineVisibility(!outlineVisible));
+layoutModeDraftButton.addEventListener('click', () => setLayoutMode('draft'));
+layoutModeProofButton.addEventListener('click', () => setLayoutMode('proof'));
+proofRefreshButton.addEventListener('click', () => refreshProofManifest(true));
+proofBlockSaveButton.addEventListener('click', applyProofBlockEdit);
+zoomInButton.addEventListener('click', () => {
+  proofZoom = Math.min(1.8, proofZoom + 0.1);
+  updateZoomLabel();
+  if (proofManifest) renderProofManifest(proofManifest);
+});
+zoomOutButton.addEventListener('click', () => {
+  proofZoom = Math.max(0.7, proofZoom - 0.1);
+  updateZoomLabel();
+  if (proofManifest) renderProofManifest(proofManifest);
+});
+document.querySelectorAll('.ribbon-tab').forEach(tab => {
+  tab.addEventListener('click', () => setRibbonTab(tab.dataset.ribbonTab || 'home'));
+});
 
 document.querySelectorAll('.toolbar-btn').forEach(btn => btn.addEventListener('click', () => {
   const a = btn.dataset.action;
@@ -2376,11 +2906,13 @@ function insertClientDocText(text) {
 
 function exemplarCard(item) {
   return `<div class="border rounded p-2 bg-white hover:border-navy">
-    <button class="exemplar-open text-left w-full text-sm font-semibold text-navy" data-id="${item.id}">${item.title}</button>
-    <div class="text-xs text-gray-600">${item.document_type || 'No type'} · ${item.case_type || 'No case type'}</div>
-    <div class="text-xs mt-1">Outcome: ${item.outcome || 'unknown'}</div>
-    <div class="text-xs text-gray-700 mt-1">${(item.snippet || '').slice(0, 220)}</div>
+    <button class="exemplar-open-draft text-left w-full text-sm font-semibold text-navy" data-id="${item.id}">${escapeHtml(item.title || 'Exemplar')}</button>
+    <div class="text-xs text-gray-600">${escapeHtml(item.document_type || 'No type')} · ${escapeHtml(item.case_type || 'No case type')}</div>
+    <div class="text-xs mt-1">Outcome: ${escapeHtml(item.outcome || 'unknown')}</div>
+    <div class="text-xs text-gray-700 mt-1">${escapeHtml((item.snippet || '').slice(0, 220))}</div>
     <div class="mt-2 flex gap-2">
+      <button class="exemplar-preview border rounded px-2 py-0.5 text-xs" data-id="${item.id}">Preview</button>
+      <button class="exemplar-style border rounded px-2 py-0.5 text-xs" data-id="${item.id}">Use Style</button>
       <button class="exemplar-insert border rounded px-2 py-0.5 text-xs" data-id="${item.id}">Insert Excerpt</button>
     </div>
   </div>`;
@@ -2390,7 +2922,9 @@ function renderExemplarResults(items) {
   const node = document.getElementById('exemplar-results');
   node.dataset.loaded = '1';
   node.innerHTML = items.length ? items.map(exemplarCard).join('') : '<div class="text-xs text-gray-500">No exemplars found.</div>';
-  node.querySelectorAll('.exemplar-open').forEach(btn => btn.addEventListener('click', () => openExemplar(btn.dataset.id)));
+  node.querySelectorAll('.exemplar-open-draft').forEach(btn => btn.addEventListener('click', () => openExemplarDraft(btn.dataset.id)));
+  node.querySelectorAll('.exemplar-preview').forEach(btn => btn.addEventListener('click', () => openExemplarPreview(btn.dataset.id)));
+  node.querySelectorAll('.exemplar-style').forEach(btn => btn.addEventListener('click', () => useExemplarAsStyleSource(btn.dataset.id)));
   node.querySelectorAll('.exemplar-insert').forEach(btn => btn.addEventListener('click', async () => {
     const detail = await getExemplarDetail(btn.dataset.id);
     insertExemplarText(detail.extracted_text || detail.snippet || '');
@@ -2411,19 +2945,65 @@ async function suggestExemplarsForDocument() {
 
 async function getExemplarDetail(exemplarId) {
   const res = await fetch(`/api/exemplars/${exemplarId}/`);
-  return await res.json();
+  return await readApiPayload(res);
 }
 
-async function openExemplar(exemplarId) {
+async function getExemplarPreview(exemplarId) {
+  const res = await fetch(`/api/exemplars/${exemplarId}/preview/`);
+  return await readApiPayload(res);
+}
+
+async function openExemplarPreview(exemplarId) {
   const data = await getExemplarDetail(exemplarId);
-  currentExemplar = data;
+  const preview = await getExemplarPreview(exemplarId);
+  currentExemplar = { ...data, preview };
   document.getElementById('exemplar-detail-panel').classList.remove('hidden');
+  const previewMarkup = preview.preview_available
+    ? (preview.pages || []).map(page => `<img class="w-full border rounded bg-white mt-2" src="${page.image_url}" alt="Exemplar page ${page.index}">`).join('')
+    : `<div class="text-xs text-gray-500 mt-2">${escapeHtml(preview.message || 'Preview unavailable.')}</div>`;
   document.getElementById('exemplar-detail').innerHTML = `
-    <h4 class="font-semibold text-navy">${data.title || ''}</h4>
-    <div class="text-xs text-gray-600">${data.document_type || ''} · ${data.case_type || ''}</div>
-    <div class="text-xs mt-1">Outcome: ${data.outcome || 'unknown'}</div>
-    <h5 class="mt-3 font-semibold text-xs text-gray-700">Extracted Text</h5>
-    <pre class="whitespace-pre-wrap text-xs bg-gray-50 p-2 rounded mt-1">${(data.extracted_text || '').slice(0, 30000)}</pre>`;
+    <h4 class="font-semibold text-navy">${escapeHtml(data.title || '')}</h4>
+    <div class="text-xs text-gray-600">${escapeHtml(data.document_type || '')} · ${escapeHtml(data.case_type || '')}</div>
+    <div class="text-xs mt-1">Outcome: ${escapeHtml(data.outcome || 'unknown')}</div>
+    <div class="text-xs mt-1 text-gray-500">${escapeHtml(preview.filename || data.filename || '')}${preview.page_count ? ` · ${preview.page_count} pages` : ''}${preview.backend ? ` · ${preview.backend}` : ''}</div>
+    <div class="mt-3 flex gap-2">
+      <button id="exemplar-open-draft-inline" class="bg-navy text-white px-2 py-1 rounded text-xs">Open as Draft</button>
+      <button id="exemplar-use-style-inline" class="border rounded px-2 py-1 text-xs">Use as Style Source</button>
+    </div>
+    <h5 class="mt-3 font-semibold text-xs text-gray-700">Word Preview</h5>
+    <div class="space-y-2">${previewMarkup}</div>
+    <h5 class="mt-4 font-semibold text-xs text-gray-700">Extracted Text</h5>
+    <pre class="whitespace-pre-wrap text-xs bg-gray-50 p-2 rounded mt-1">${escapeHtml((data.extracted_text || '').slice(0, 12000))}</pre>`;
+  document.getElementById('exemplar-open-draft-inline').addEventListener('click', () => openExemplarDraft(exemplarId));
+  document.getElementById('exemplar-use-style-inline').addEventListener('click', () => useExemplarAsStyleSource(exemplarId));
+}
+
+async function openExemplarDraft(exemplarId) {
+  const res = await fetch(`/api/exemplars/${exemplarId}/open/`, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+  });
+  const data = await readApiPayload(res);
+  if (!res.ok) {
+    window.alert(data.error || 'Unable to open that exemplar as a draft.');
+    return;
+  }
+  window.location.href = data.editor_url;
+}
+
+async function useExemplarAsStyleSource(exemplarId) {
+  const res = await fetch(`/api/documents/${docId}/style-source/${exemplarId}/`, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken },
+  });
+  const data = await readApiPayload(res);
+  if (!res.ok) {
+    window.alert(data.error || 'Unable to use that exemplar as the style source.');
+    return;
+  }
+  documentMetadata = data.metadata || documentMetadata;
+  updateStyleSourceBadge();
+  setProofStatus('Style source updated. Refresh the proof preview to verify formatting.', 'success');
 }
 
 function insertExemplarText(text) {
@@ -2511,6 +3091,11 @@ document.getElementById('run-exemplar-search').addEventListener('click', () => {
   searchExemplars(document.getElementById('exemplar-query').value);
 });
 document.getElementById('run-exemplar-suggest').addEventListener('click', suggestExemplarsForDocument);
+document.getElementById('run-exemplar-suggest-ribbon').addEventListener('click', () => {
+  openSidebar();
+  setTab('exemplars');
+  suggestExemplarsForDocument();
+});
 
 function renderVersions(items) {
   const node = document.getElementById('versions-list');
@@ -3143,9 +3728,15 @@ document.addEventListener('click', (e) => {
 
 setTab('chat');
 normalizeFootnotes();
+renderRuler();
+updateZoomLabel();
+setRibbonTab('home');
 setOutlineVisibility(true);
 renderOutline();
+renderProofBlockList();
 updateDocumentChrome();
 updateToolbar();
+updateStyleSourceBadge();
+setLayoutMode(currentLayoutMode, { persist: false, loadProof: currentLayoutMode === 'proof' });
 </script>
 {% endblock %}
