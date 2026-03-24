@@ -1,11 +1,14 @@
 from django.urls import path
 from django.contrib.auth import views as auth_views
-from . import agent_views, document_file_views, views, research_views, exemplar_views
+from . import agent_views, document_file_views, views, research_views, exemplar_views, word_addin_views
 
 urlpatterns = [
     # Auth
     path("login/", auth_views.LoginView.as_view(template_name="editor/login.html"), name="login"),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+    path("word-addin/manifest.xml", word_addin_views.word_addin_manifest, name="word_addin_manifest"),
+    path("word-addin/commands/", word_addin_views.word_addin_commands, name="word_addin_commands"),
+    path("word-addin/taskpane/", word_addin_views.word_addin_taskpane, name="word_addin_taskpane"),
     # Dashboard
     path("", views.dashboard, name="dashboard"),
     # Document operations
@@ -84,6 +87,14 @@ urlpatterns = [
         exemplar_views.exemplar_suggest_for_document,
         name="exemplar_suggest_document",
     ),
+    # Word add-in API
+    path("api/word-addin/document-types/", word_addin_views.word_addin_document_types, name="word_addin_document_types"),
+    path("api/word-addin/workspaces/bootstrap/", word_addin_views.word_addin_workspace_bootstrap, name="word_addin_workspace_bootstrap"),
+    path("api/word-addin/workspaces/<uuid:workspace_id>/session/", word_addin_views.word_addin_workspace_session, name="word_addin_workspace_session"),
+    path("api/word-addin/workspaces/<uuid:workspace_id>/chat/", word_addin_views.word_addin_chat_persist, name="word_addin_chat_persist"),
+    path("api/word-addin/workspaces/<uuid:workspace_id>/suggest/", word_addin_views.word_addin_suggest_persist, name="word_addin_suggest_persist"),
+    path("api/word-addin/runs/<uuid:run_id>/", word_addin_views.word_addin_run_detail, name="word_addin_run_detail"),
+    path("api/word-addin/citation-format/", word_addin_views.word_addin_citation_format, name="word_addin_citation_format"),
     # Export
     path("export/<uuid:doc_id>/docx/", views.export_docx, name="export_docx"),
     path("export/<uuid:doc_id>/pdf/", views.export_pdf, name="export_pdf"),

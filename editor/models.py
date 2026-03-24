@@ -254,3 +254,130 @@ class DocumentResearchRun(models.Model):
             f"{self.session.document} {self.mode} run "
             f"{self.public_id} ({self.status})"
         )
+
+
+class WritingWorkspace(models.Model):
+    KIND_CHOICES = [
+        ("word_addin", "Word Add-in"),
+        ("web_editor", "Web Editor"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default="word_addin")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="writing_workspaces")
+    title = models.CharField(max_length=500, default="Untitled Word Document")
+    document_type = models.ForeignKey(
+        DocumentType, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    external_document_key = models.CharField(max_length=200, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.get_kind_display()}: {self.title}"
+
+
+class WorkspaceResearchSession(models.Model):
+    workspace = models.ForeignKey(
+        WritingWorkspace, on_delete=models.CASCADE, related_name="research_sessions"
+    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "user"],
+                name="editor_unique_workspace_research_session",
+            )
+        ]
+
+    def __str__(self):
+        return f"Workspace session for {self.workspace} ({self.user})"
+
+
+class WorkspaceResearchMessage(models.Model):
+    ROLE_CHOICES = [
+        ("user", "User"),
+        ("assistant", "Assistant"),
+    ]
+
+    session = models.ForeignKey(
+        WorkspaceResearchSession, on_delete=models.CASCADE, related_name="messages"
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    content = models.TextField()
+    selection_text = models.TextField(blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.session.workspace.title} {self.role} message "
+            f"@ {self.created_at.isoformat()}"
+        )
+
+
+class WorkspaceResearchRun(models.Model):
+    MODE_CHOICES = [
+        ("chat", "Chat"),
+        ("suggest", "Suggest"),
+    ]
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("in_progress", "In Progress"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    session = models.ForeignKey(
+        WorkspaceResearchSession,
+        on_delete=models.CASCADE,
+        related_name="runs",
+    )
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    request_payload = models.JSONField(default=dict, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    bridge_job_id = models.CharField(max_length=100, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    user_message = models.ForeignKey(
+        WorkspaceResearchMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workspace_initiated_runs",
+    )
+    assistant_message = models.ForeignKey(
+        WorkspaceResearchMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workspace_completed_runs",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.session.workspace.title} {self.mode} run "
+            f"{self.public_id} ({self.status})"
+        )

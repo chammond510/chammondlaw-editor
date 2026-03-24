@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+  xsi:type="TaskPaneApp">
+  <Id>8c5c6f2a-3818-4e17-87a5-90a52b8dd8d2</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Hammond Law</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="BIA Edge for Word"/>
+  <Description DefaultValue="Research, case suggestions, and exemplar lookup inside Microsoft Word using a local Codex bridge."/>
+  <IconUrl DefaultValue="{{ icon_url }}"/>
+  <HighResolutionIconUrl DefaultValue="{{ icon_url }}"/>
+  <SupportUrl DefaultValue="{{ taskpane_url }}"/>
+  <AppDomains>
+    <AppDomain>{{ app_domain }}</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Document"/>
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="{{ taskpane_url }}"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <ov:VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="ov:VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="ov:Document">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+          </GetStarted>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="BiaEdge.Group">
+                <Label resid="BiaEdge.GroupLabel"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="BiaEdge.OpenPane">
+                  <Label resid="BiaEdge.ButtonLabel"/>
+                  <Supertip>
+                    <Title resid="BiaEdge.ButtonLabel"/>
+                    <Description resid="BiaEdge.ButtonDescription"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ButtonId1</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="{{ icon_url }}"/>
+        <bt:Image id="Icon.32" DefaultValue="{{ icon_url }}"/>
+        <bt:Image id="Icon.80" DefaultValue="{{ icon_url }}"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="{{ taskpane_url }}"/>
+        <bt:Url id="Commands.Url" DefaultValue="{{ commands_url }}"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="{{ taskpane_url }}"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GetStarted.Title" DefaultValue="BIA Edge for Word"/>
+        <bt:String id="BiaEdge.GroupLabel" DefaultValue="BIA Edge"/>
+        <bt:String id="BiaEdge.ButtonLabel" DefaultValue="Open BIA Edge"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="GetStarted.Description" DefaultValue="Open the BIA Edge task pane to research and insert authorities while drafting."/>
+        <bt:String id="BiaEdge.ButtonDescription" DefaultValue="Open the BIA Edge task pane."/>
+      </bt:LongStrings>
+    </Resources>
+  </ov:VersionOverrides>
+</OfficeApp>

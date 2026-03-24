@@ -41,6 +41,10 @@ from .models import (
     DocumentVersion,
     DocumentType,
     Exemplar,
+    WritingWorkspace,
+    WorkspaceResearchMessage,
+    WorkspaceResearchRun,
+    WorkspaceResearchSession,
 )
 from .openai_file_service import analyze_client_file_with_input_file, sync_client_file_openai_index
 from .proof_service import ProofRenderError, SofficeRenderBackend, render_document_proof
@@ -667,6 +671,306 @@ class EditorViewTests(TestCase):
         self.assertContains(response, 'id="focus-toggle"', html=False)
         self.assertContains(response, '@tiptap/extension-text-align', html=False)
         self.assertContains(response, 'Cmd/Ctrl+K link', html=False)
+
+
+class WordAddinViewsTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="word-addin-user", password="secret")
+        self.client.force_login(self.user)
+        self.document_type = DocumentType.objects.create(
+            name="Asylum Brief",
+            slug="asylum-brief",
+            category="brief",
+            template_content=_sample_tiptap("Template"),
+            export_format="court_brief",
+            order=1,
+        )
+        self.second_document_type = DocumentType.objects.create(
+            name="Waiver Cover Letter",
+            slug="waiver-cover-letter",
+            category="cover_letter",
+            template_content=_sample_tiptap("Template"),
+            export_format="cover_letter",
+            order=2,
+        )
+
+    def test_word_addin_manifest_uses_public_commands_page(self):
+        response = self.client.get(reverse("word_addin_manifest"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/xml", response["Content-Type"])
+        body = response.content.decode("utf-8")
+        self.assertIn("/word-addin/commands/", body)
+        self.assertIn("/word-addin/taskpane/", body)
+        self.assertIn("<AppDomain>http://testserver</AppDomain>", body)
+
+    def test_word_addin_document_types_returns_expected_fields(self):
+        response = self.client.get(reverse("word_addin_document_types"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["document_types"],
+            [
+                {
+                    "id": self.document_type.id,
+                    "name": "Asylum Brief",
+                    "slug": "asylum-brief",
+                    "category": "brief",
+                    "export_format": "court_brief",
+                },
+                {
+                    "id": self.second_document_type.id,
+                    "name": "Waiver Cover Letter",
+                    "slug": "waiver-cover-letter",
+                    "category": "cover_letter",
+                    "export_format": "cover_letter",
+                },
+            ],
+        )
+
+    def test_word_addin_workspace_bootstrap_creates_workspace_and_session(self):
+        response = self.client.post(
+            reverse("word_addin_workspace_bootstrap"),
+            data={
+                "document_title": "Cancellation Motion Draft",
+                "document_type_slug": self.document_type.slug,
+                "external_document_key": "word://draft-123",
+                "persistent": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        workspace = WritingWorkspace.objects.get(id=payload["workspace"]["id"])
+        session = WorkspaceResearchSession.objects.get(workspace=workspace, user=self.user)
+
+        self.assertEqual(workspace.title, "Cancellation Motion Draft")
+        self.assertEqual(workspace.document_type, self.document_type)
+        self.assertEqual(workspace.external_document_key, "word://draft-123")
+        self.assertFalse(workspace.metadata["persistent"])
+        self.assertEqual(payload["session"]["id"], session.id)
+        self.assertFalse(payload["persistent"])
+
+    def test_word_addin_workspace_bootstrap_updates_existing_workspace(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Old Title",
+            document_type=self.document_type,
+            external_document_key="word://old",
+            metadata={"persistent": True},
+        )
+
+        response = self.client.post(
+            reverse("word_addin_workspace_bootstrap"),
+            data={
+                "workspace_id": str(workspace.id),
+                "document_title": "Updated Title",
+                "document_type_slug": self.second_document_type.slug,
+                "external_document_key": "word://updated",
+                "persistent": True,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        workspace.refresh_from_db()
+        self.assertEqual(workspace.title, "Updated Title")
+        self.assertEqual(workspace.document_type, self.second_document_type)
+        self.assertEqual(workspace.external_document_key, "word://updated")
+        self.assertTrue(WorkspaceResearchSession.objects.filter(workspace=workspace, user=self.user).exists())
+
+    def test_word_addin_workspace_session_returns_messages_and_latest_runs(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Word Draft",
+            document_type=self.document_type,
+        )
+        session = WorkspaceResearchSession.objects.create(workspace=workspace, user=self.user)
+        WorkspaceResearchMessage.objects.create(
+            session=session,
+            role="user",
+            content="What authority do I need here?",
+            selection_text="The gang threatened the client after he reported extortion.",
+        )
+        assistant_message = WorkspaceResearchMessage.objects.create(
+            session=session,
+            role="assistant",
+            content="Matter of C-T-L- is the starting point.",
+            citations=[{"citation": "25 I&N Dec. 341 (BIA 2010)"}],
+        )
+        chat_run = WorkspaceResearchRun.objects.create(
+            session=session,
+            mode="chat",
+            status="completed",
+            result_payload={"answer": "Matter of C-T-L- is the starting point."},
+            assistant_message=assistant_message,
+        )
+        suggest_run = WorkspaceResearchRun.objects.create(
+            session=session,
+            mode="suggest",
+            status="completed",
+            result_payload={
+                "authorities": [
+                    {
+                        "citation": "25 I&N Dec. 341 (BIA 2010)",
+                        "title": "Matter of C-T-L-",
+                    }
+                ]
+            },
+        )
+
+        response = self.client.get(
+            reverse("word_addin_workspace_session", kwargs={"workspace_id": workspace.id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["workspace"]["id"], str(workspace.id))
+        self.assertEqual(len(payload["messages"]), 2)
+        self.assertEqual(payload["latest_chat_run"]["id"], str(chat_run.public_id))
+        self.assertEqual(payload["latest_suggest_run"]["id"], str(suggest_run.public_id))
+
+    def test_word_addin_chat_persist_creates_messages_and_run(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Word Draft",
+            document_type=self.document_type,
+        )
+
+        response = self.client.post(
+            reverse("word_addin_chat_persist", kwargs={"workspace_id": workspace.id}),
+            data={
+                "user_message": "What should I cite for nexus?",
+                "assistant_message": "Matter of C-T-L- supports the one central reason analysis.",
+                "selected_text": "The gang threatened him after he reported extortion.",
+                "citations": [
+                    {
+                        "kind": "case",
+                        "title": "Matter of C-T-L-",
+                        "citation": "25 I&N Dec. 341 (BIA 2010)",
+                        "document_id": 101,
+                    }
+                ],
+                "bridge_job_id": "job-123",
+                "metadata": {"source": "codex_bridge", "model": "gpt-5.4"},
+                "status": "completed",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        run = WorkspaceResearchRun.objects.get(public_id=payload["run"]["id"])
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(run.bridge_job_id, "job-123")
+        self.assertEqual(run.user_message.content, "What should I cite for nexus?")
+        self.assertEqual(run.assistant_message.content, "Matter of C-T-L- supports the one central reason analysis.")
+        self.assertEqual(run.result_payload["citations"][0]["citation"], "25 I&N Dec. 341 (BIA 2010)")
+
+    def test_word_addin_chat_persist_records_failed_run_without_assistant_message(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Word Draft",
+            document_type=self.document_type,
+        )
+
+        response = self.client.post(
+            reverse("word_addin_chat_persist", kwargs={"workspace_id": workspace.id}),
+            data={
+                "user_message": "What should I cite for nexus?",
+                "selected_text": "The gang threatened him after he reported extortion.",
+                "bridge_job_id": "job-124",
+                "status": "failed",
+                "error_message": "Codex bridge failed.",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 502)
+        run = WorkspaceResearchRun.objects.get(public_id=response.json()["run"]["id"])
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.error_message, "Codex bridge failed.")
+        self.assertIsNone(run.assistant_message)
+
+    def test_word_addin_run_detail_uses_failed_status_code(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Word Draft",
+            document_type=self.document_type,
+        )
+        session = WorkspaceResearchSession.objects.create(workspace=workspace, user=self.user)
+        run = WorkspaceResearchRun.objects.create(
+            session=session,
+            mode="suggest",
+            status="failed",
+            error_message="Codex bridge failed.",
+        )
+
+        response = self.client.get(
+            reverse("word_addin_run_detail", kwargs={"run_id": run.public_id})
+        )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["run"]["error_message"], "Codex bridge failed.")
+
+    def test_word_addin_suggest_persist_requires_selected_text(self):
+        workspace = WritingWorkspace.objects.create(
+            user=self.user,
+            kind="word_addin",
+            title="Word Draft",
+            document_type=self.document_type,
+        )
+
+        response = self.client.post(
+            reverse("word_addin_suggest_persist", kwargs={"workspace_id": workspace.id}),
+            data={"focus_note": "Nexus"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "selected_text is required.")
+
+    def test_word_addin_citation_format_supports_styles(self):
+        quote_response = self.client.post(
+            reverse("word_addin_citation_format"),
+            data={
+                "style": "quote",
+                "authority": {
+                    "citation": "25 I&N Dec. 341 (BIA 2010)",
+                    "pinpoint": "One protected ground must be one central reason for the harm.",
+                },
+            },
+            content_type="application/json",
+        )
+        parenthetical_response = self.client.post(
+            reverse("word_addin_citation_format"),
+            data={
+                "style": "parenthetical",
+                "authority": {
+                    "citation": "8 C.F.R. § 1208.13",
+                    "suggested_use": "Sets out the asylum eligibility framework.",
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(quote_response.status_code, 200)
+        self.assertEqual(
+            quote_response.json()["plain_text"],
+            "“One protected ground must be one central reason for the harm.” 25 I&N Dec. 341 (BIA 2010)",
+        )
+        self.assertEqual(
+            parenthetical_response.json()["plain_text"],
+            "8 C.F.R. § 1208.13 (Sets out the asylum eligibility framework.)",
+        )
 
 
 class ExportFormattingTests(TestCase):

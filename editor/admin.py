@@ -8,6 +8,10 @@ from .models import (
     DocumentResearchSession,
     DocumentResearchMessage,
     DocumentResearchRun,
+    WritingWorkspace,
+    WorkspaceResearchSession,
+    WorkspaceResearchMessage,
+    WorkspaceResearchRun,
 )
 
 
@@ -74,5 +78,39 @@ class DocumentResearchRunAdmin(admin.ModelAdmin):
         "session__document__title",
         "session__user__username",
         "response_id",
+        "error_message",
+    ]
+
+
+@admin.register(WritingWorkspace)
+class WritingWorkspaceAdmin(admin.ModelAdmin):
+    list_display = ["title", "kind", "document_type", "user", "updated_at"]
+    list_filter = ["kind", "document_type", "updated_at"]
+    search_fields = ["title", "user__username", "user__email", "external_document_key"]
+
+
+@admin.register(WorkspaceResearchSession)
+class WorkspaceResearchSessionAdmin(admin.ModelAdmin):
+    list_display = ["workspace", "user", "updated_at"]
+    list_filter = ["updated_at"]
+    search_fields = ["workspace__title", "user__username", "user__email"]
+
+
+@admin.register(WorkspaceResearchMessage)
+class WorkspaceResearchMessageAdmin(admin.ModelAdmin):
+    list_display = ["session", "role", "created_at"]
+    list_filter = ["role", "created_at"]
+    search_fields = ["session__workspace__title", "content", "selection_text"]
+
+
+@admin.register(WorkspaceResearchRun)
+class WorkspaceResearchRunAdmin(admin.ModelAdmin):
+    list_display = ["public_id", "session", "mode", "status", "bridge_job_id", "updated_at"]
+    list_filter = ["mode", "status", "updated_at"]
+    search_fields = [
+        "public_id",
+        "session__workspace__title",
+        "session__user__username",
+        "bridge_job_id",
         "error_message",
     ]

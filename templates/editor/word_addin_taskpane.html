@@ -1,0 +1,109 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BIA Edge for Word</title>
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <link rel="stylesheet" href="{% static 'word-addin/taskpane.css' %}">
+</head>
+<body data-bridge-url="{{ bridge_url|escape }}">
+    <div class="shell">
+        <header class="topbar">
+            <div>
+                <div class="eyebrow">Hammond Law</div>
+                <h1>BIA Edge for Word</h1>
+            </div>
+            <a class="logout-link" href="{% url 'logout' %}" target="_blank" rel="noopener noreferrer">Logout</a>
+        </header>
+
+        <section class="bridge-panel">
+            <div class="bridge-row">
+                <label for="bridge-url">Local Codex bridge</label>
+                <input id="bridge-url" type="url" spellcheck="false" value="{{ bridge_url|escape }}" placeholder="https://localhost:8765">
+                <button id="bridge-save" type="button">Save</button>
+                <button id="bridge-check" type="button">Check</button>
+            </div>
+            <div id="bridge-status" class="status-text">Bridge status unknown. Run the local TLS setup once, then start the bridge.</div>
+        </section>
+
+        <section class="workspace-panel">
+            <div class="field-grid">
+                <div class="field">
+                    <label for="document-type-select">Document type</label>
+                    <select id="document-type-select"></select>
+                </div>
+                <div class="field">
+                    <label for="document-title">Document title</label>
+                    <input id="document-title" type="text" value="Untitled Word Document">
+                </div>
+            </div>
+            <div class="workspace-actions">
+                <button id="workspace-sync" type="button">Sync Document Context</button>
+                <span id="workspace-status" class="status-text">Workspace not synced.</span>
+            </div>
+        </section>
+
+        <section class="selection-panel">
+            <div class="panel-head">
+                <h2>Current Selection</h2>
+                <button id="selection-refresh" type="button">Refresh</button>
+            </div>
+            <pre id="selection-preview" class="selection-preview">No selection loaded.</pre>
+        </section>
+
+        <nav class="tabs">
+            <button class="tab is-active" data-tab="ask" type="button">Ask</button>
+            <button class="tab" data-tab="suggest" type="button">Suggest</button>
+            <button class="tab" data-tab="authorities" type="button">Authorities</button>
+            <button class="tab" data-tab="exemplars" type="button">Exemplars</button>
+        </nav>
+
+        <main class="panes">
+            <section class="pane is-active" data-pane="ask">
+                <label class="stack-label" for="ask-message">Question</label>
+                <textarea id="ask-message" rows="4" placeholder="Ask about the current document or selected paragraph."></textarea>
+                <div class="action-row">
+                    <button id="ask-run" type="button">Run Ask</button>
+                    <span id="ask-status" class="status-text"></span>
+                </div>
+                <div id="chat-thread" class="thread"></div>
+            </section>
+
+            <section class="pane" data-pane="suggest">
+                <label class="stack-label" for="suggest-note">Focus note</label>
+                <textarea id="suggest-note" rows="3" placeholder="Optional note to narrow the authority search."></textarea>
+                <div class="action-row">
+                    <button id="suggest-run" type="button">Run Suggest</button>
+                    <span id="suggest-status" class="status-text"></span>
+                </div>
+                <div id="suggest-results" class="cards"></div>
+            </section>
+
+            <section class="pane" data-pane="authorities">
+                <div class="panel-head">
+                    <h2>Categories</h2>
+                    <button id="categories-load" type="button">Load</button>
+                </div>
+                <div id="category-list" class="pill-list"></div>
+                <div id="category-results" class="cards"></div>
+            </section>
+
+            <section class="pane" data-pane="exemplars">
+                <div class="field">
+                    <label for="exemplar-query">Search exemplars</label>
+                    <input id="exemplar-query" type="text" placeholder="family PSG, hardship waiver, asylum nexus">
+                </div>
+                <div class="action-row">
+                    <button id="exemplar-search" type="button">Search</button>
+                    <span id="exemplar-status" class="status-text"></span>
+                </div>
+                <div id="exemplar-results" class="cards"></div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="{% static 'word-addin/taskpane.js' %}"></script>
+</body>
+</html>
