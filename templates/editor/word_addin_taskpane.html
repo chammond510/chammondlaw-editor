@@ -11,93 +11,140 @@
 <body data-bridge-url="{{ bridge_url|escape }}">
     <div class="shell">
         <header class="topbar">
-            <div>
+            <div class="brand-lockup">
                 <div class="eyebrow">Hammond Law</div>
                 <h1>BIA Edge for Word</h1>
+                <p class="subhead">Ask while you draft. Context and research tools stay close, but out of the way.</p>
             </div>
             <a class="logout-link" href="{% url 'logout' %}" target="_blank" rel="noopener noreferrer">Logout</a>
         </header>
 
-        <section class="bridge-panel">
-            <div class="bridge-row">
-                <label for="bridge-url">Local Codex bridge</label>
-                <input id="bridge-url" type="url" spellcheck="false" value="{{ bridge_url|escape }}" placeholder="https://localhost:8765">
-                <button id="bridge-save" type="button">Save</button>
-                <button id="bridge-check" type="button">Check</button>
+        <section class="focus-bar">
+            <div class="focus-meta">
+                <div id="bridge-summary" class="focus-chip">Bridge not checked</div>
+                <div id="workspace-summary" class="focus-chip">Document not synced</div>
+                <div id="selection-summary" class="focus-chip">No selection</div>
             </div>
-            <div id="bridge-status" class="status-text">Bridge status unknown. Run the local TLS setup once, then start the bridge.</div>
+
+            <nav class="tabs">
+                <button class="tab is-active" data-tab="ask" type="button">Ask</button>
+                <button class="tab" data-tab="suggest" type="button">Suggest</button>
+                <button class="tab" data-tab="authorities" type="button">Authorities</button>
+                <button class="tab" data-tab="exemplars" type="button">Exemplars</button>
+            </nav>
         </section>
 
-        <section class="workspace-panel">
-            <div class="field-grid">
-                <div class="field">
-                    <label for="document-type-select">Document type</label>
-                    <select id="document-type-select"></select>
-                </div>
-                <div class="field">
-                    <label for="document-title">Document title</label>
-                    <input id="document-title" type="text" value="Untitled Word Document">
-                </div>
-            </div>
-            <div class="workspace-actions">
-                <button id="workspace-sync" type="button">Sync Document Context</button>
-                <span id="workspace-status" class="status-text">Workspace not synced.</span>
-            </div>
-        </section>
+        <details class="context-drawer">
+            <summary>Context, setup, and selection</summary>
+            <div class="context-grid">
+                <section class="bridge-panel">
+                    <div class="bridge-row">
+                        <label for="bridge-url">Local Codex bridge</label>
+                        <input id="bridge-url" type="url" spellcheck="false" value="{{ bridge_url|escape }}" placeholder="https://localhost:8765">
+                        <button id="bridge-save" type="button">Save</button>
+                        <button id="bridge-check" type="button">Check</button>
+                    </div>
+                    <div id="bridge-status" class="status-text">Bridge status unknown. Run the local TLS setup once, then start the bridge.</div>
+                </section>
 
-        <section class="selection-panel">
-            <div class="panel-head">
-                <h2>Current Selection</h2>
-                <button id="selection-refresh" type="button">Refresh</button>
-            </div>
-            <pre id="selection-preview" class="selection-preview">No selection loaded.</pre>
-        </section>
+                <section class="workspace-panel">
+                    <div class="field-grid">
+                        <div class="field">
+                            <label for="document-type-select">Document type</label>
+                            <select id="document-type-select"></select>
+                        </div>
+                        <div class="field">
+                            <label for="document-title">Document title</label>
+                            <input id="document-title" type="text" value="Untitled Word Document">
+                        </div>
+                    </div>
+                    <div class="workspace-actions">
+                        <button id="workspace-sync" type="button">Sync Document Context</button>
+                        <span id="workspace-status" class="status-text">Workspace not synced.</span>
+                    </div>
+                </section>
 
-        <nav class="tabs">
-            <button class="tab is-active" data-tab="ask" type="button">Ask</button>
-            <button class="tab" data-tab="suggest" type="button">Suggest</button>
-            <button class="tab" data-tab="authorities" type="button">Authorities</button>
-            <button class="tab" data-tab="exemplars" type="button">Exemplars</button>
-        </nav>
+                <section class="selection-panel">
+                    <div class="panel-head">
+                        <h2>Current Selection</h2>
+                        <button id="selection-refresh" type="button">Refresh</button>
+                    </div>
+                    <pre id="selection-preview" class="selection-preview">No selection loaded.</pre>
+                </section>
+            </div>
+        </details>
 
         <main class="panes">
-            <section class="pane is-active" data-pane="ask">
-                <label class="stack-label" for="ask-message">Question</label>
-                <textarea id="ask-message" rows="4" placeholder="Ask about the current document or selected paragraph."></textarea>
-                <div class="action-row">
-                    <button id="ask-run" type="button">Run Ask</button>
-                    <span id="ask-status" class="status-text"></span>
+            <section class="pane pane-chat is-active" data-pane="ask">
+                <div class="pane-intro">
+                    <div>
+                        <div class="pane-kicker">Primary Workspace</div>
+                        <h2>Research Chat</h2>
+                    </div>
+                    <p class="pane-copy">Ask from the live draft. The current selection and clipped document context are attached automatically.</p>
                 </div>
                 <div id="chat-thread" class="thread"></div>
+                <div class="composer-card">
+                    <label class="stack-label" for="ask-message">Question</label>
+                    <textarea id="ask-message" rows="4" placeholder="Ask about the current document or selected paragraph."></textarea>
+                    <div class="action-row">
+                        <span id="ask-status" class="status-text"></span>
+                        <button id="ask-run" type="button">Ask BIA Edge</button>
+                    </div>
+                </div>
             </section>
 
             <section class="pane" data-pane="suggest">
-                <label class="stack-label" for="suggest-note">Focus note</label>
-                <textarea id="suggest-note" rows="3" placeholder="Optional note to narrow the authority search."></textarea>
-                <div class="action-row">
-                    <button id="suggest-run" type="button">Run Suggest</button>
-                    <span id="suggest-status" class="status-text"></span>
+                <div class="pane-intro">
+                    <div>
+                        <div class="pane-kicker">Targeted Search</div>
+                        <h2>Authority Suggestions</h2>
+                    </div>
+                    <p class="pane-copy">Select a paragraph in Word, add a narrow note if needed, and pull the best supporting authorities.</p>
+                </div>
+                <div class="composer-card">
+                    <label class="stack-label" for="suggest-note">Focus note</label>
+                    <textarea id="suggest-note" rows="3" placeholder="Optional note to narrow the authority search."></textarea>
+                    <div class="action-row">
+                        <span id="suggest-status" class="status-text"></span>
+                        <button id="suggest-run" type="button">Run Suggest</button>
+                    </div>
                 </div>
                 <div id="suggest-results" class="cards"></div>
             </section>
 
             <section class="pane" data-pane="authorities">
+                <div class="pane-intro">
+                    <div>
+                        <div class="pane-kicker">Browse</div>
+                        <h2>Authorities</h2>
+                    </div>
+                    <p class="pane-copy">Jump by category, inspect authority detail, and insert a clean cite back into the draft.</p>
+                </div>
                 <div class="panel-head">
-                    <h2>Categories</h2>
-                    <button id="categories-load" type="button">Load</button>
+                    <button id="categories-load" type="button">Load Categories</button>
                 </div>
                 <div id="category-list" class="pill-list"></div>
                 <div id="category-results" class="cards"></div>
             </section>
 
             <section class="pane" data-pane="exemplars">
-                <div class="field">
-                    <label for="exemplar-query">Search exemplars</label>
-                    <input id="exemplar-query" type="text" placeholder="family PSG, hardship waiver, asylum nexus">
+                <div class="pane-intro">
+                    <div>
+                        <div class="pane-kicker">Drafting Support</div>
+                        <h2>Exemplars</h2>
+                    </div>
+                    <p class="pane-copy">Search prior work by theme and insert a useful excerpt without leaving Word.</p>
                 </div>
-                <div class="action-row">
-                    <button id="exemplar-search" type="button">Search</button>
-                    <span id="exemplar-status" class="status-text"></span>
+                <div class="composer-card">
+                    <div class="field">
+                        <label for="exemplar-query">Search exemplars</label>
+                        <input id="exemplar-query" type="text" placeholder="family PSG, hardship waiver, asylum nexus">
+                    </div>
+                    <div class="action-row">
+                        <span id="exemplar-status" class="status-text"></span>
+                        <button id="exemplar-search" type="button">Search</button>
+                    </div>
                 </div>
                 <div id="exemplar-results" class="cards"></div>
             </section>

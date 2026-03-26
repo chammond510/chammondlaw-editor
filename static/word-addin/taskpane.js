@@ -23,12 +23,15 @@ const elements = {
     bridgeSave: document.getElementById("bridge-save"),
     bridgeCheck: document.getElementById("bridge-check"),
     bridgeStatus: document.getElementById("bridge-status"),
+    bridgeSummary: document.getElementById("bridge-summary"),
     documentTypeSelect: document.getElementById("document-type-select"),
     documentTitle: document.getElementById("document-title"),
     workspaceSync: document.getElementById("workspace-sync"),
     workspaceStatus: document.getElementById("workspace-status"),
+    workspaceSummary: document.getElementById("workspace-summary"),
     selectionRefresh: document.getElementById("selection-refresh"),
     selectionPreview: document.getElementById("selection-preview"),
+    selectionSummary: document.getElementById("selection-summary"),
     askMessage: document.getElementById("ask-message"),
     askRun: document.getElementById("ask-run"),
     askStatus: document.getElementById("ask-status"),
@@ -95,6 +98,34 @@ function setStatus(element, text, variant = "") {
     }
 }
 
+function setChip(element, text, variant = "") {
+    if (!element) {
+        return;
+    }
+    element.textContent = text;
+    element.classList.remove("status-good", "status-bad");
+    if (variant === "good") {
+        element.classList.add("status-good");
+    } else if (variant === "bad") {
+        element.classList.add("status-bad");
+    }
+}
+
+function updateWorkspaceSummary(text, variant = "") {
+    setChip(elements.workspaceSummary, text, variant);
+}
+
+function updateSelectionSummary(selectionText) {
+    const trimmed = String(selectionText || "").trim();
+    if (!trimmed) {
+        setChip(elements.selectionSummary, "No selection");
+        return;
+    }
+    const compact = trimmed.replace(/\s+/g, " ");
+    const preview = compact.length > 60 ? `${compact.slice(0, 57)}...` : compact;
+    setChip(elements.selectionSummary, `Selection: ${preview}`);
+}
+
 function switchTab(name) {
     elements.tabs.forEach((tab) => {
         tab.classList.toggle("is-active", tab.dataset.tab === name);
@@ -106,6 +137,17 @@ function switchTab(name) {
 
 function renderThread() {
     elements.chatThread.innerHTML = "";
+    elements.chatThread.classList.toggle("is-empty", !state.messages.length);
+    if (!state.messages.length) {
+        const empty = document.createElement("div");
+        empty.className = "thread-empty";
+        empty.innerHTML = `
+            <strong>Start with the paragraph in front of you.</strong>
+            <div>Ask a question, or select text in Word and let BIA Edge pull the supporting authorities.</div>
+        `;
+        elements.chatThread.appendChild(empty);
+        return;
+    }
     state.messages.forEach((message) => {
         const item = document.createElement("article");
         item.className = "thread-item";
@@ -278,6 +320,12 @@ async function bootstrapWorkspace() {
         persistent: payload.persistent,
     });
     setStatus(elements.workspaceStatus, `Workspace synced: ${payload.workspace.title}`, "good");
+    updateWorkspaceSummary(
+        payload.workspace.document_type?.name
+            ? `${payload.workspace.document_type.name} • ${payload.workspace.title}`
+            : payload.workspace.title,
+        "good"
+    );
     await loadWorkspaceSession();
 }
 
@@ -294,6 +342,12 @@ async function loadWorkspaceSession() {
     if (payload.workspace.document_type?.slug) {
         elements.documentTypeSelect.value = payload.workspace.document_type.slug;
     }
+    updateWorkspaceSummary(
+        payload.workspace.document_type?.name
+            ? `${payload.workspace.document_type.name} • ${payload.workspace.title}`
+            : payload.workspace.title,
+        "good"
+    );
     renderThread();
     if (state.latestSuggestRun?.result?.authorities) {
         renderSuggestResults(state.latestSuggestRun.result.authorities);
@@ -317,6 +371,11 @@ async function checkBridge() {
                 : (payload.error || "Bridge unavailable."),
             payload.ok ? "good" : "bad"
         );
+        setChip(
+            elements.bridgeSummary,
+            payload.ok ? `Bridge live • ${payload.model || "default"}` : (payload.error || "Bridge unavailable."),
+            payload.ok ? "good" : "bad"
+        );
     } catch (error) {
         state.bridgeHealthy = false;
         setStatus(
@@ -324,6 +383,7 @@ async function checkBridge() {
             `${formatBridgeError(error)} Run "python scripts/setup_word_addin_local_tls.py" once, then start "python scripts/word_addin_codex_bridge.py" with the generated cert and key.`,
             "bad"
         );
+        setChip(elements.bridgeSummary, "Bridge offline", "bad");
     }
 }
 
@@ -332,8 +392,10 @@ async function refreshSelection() {
         const selectionText = await readSelectionText();
         state.selectionText = selectionText;
         elements.selectionPreview.textContent = selectionText || "No selection loaded.";
+        updateSelectionSummary(selectionText);
     } catch (error) {
         elements.selectionPreview.textContent = formatBridgeError(error);
+        setChip(elements.selectionSummary, "Selection unavailable", "bad");
     }
 }
 
@@ -641,6 +703,8 @@ async function initialize() {
     }
     elements.bridgeUrl.value = state.bridgeUrl;
     elements.documentTitle.value = await detectDocumentTitle();
+    updateWorkspaceSummary("Document not synced");
+    updateSelectionSummary("");
     await loadDocumentTypes();
     await checkBridge();
     await refreshSelection();
